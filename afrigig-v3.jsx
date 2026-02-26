@@ -92,7 +92,7 @@ const db = {
 
 const K = { U:"ag3:users",J:"ag3:jobs",A:"ag3:apps",M:"ag3:msgs",C:"ag3:convos",N:"ag3:notifs",T:"ag3:tickets",TX:"ag3:txn",W:"ag3:wallets",E:"ag3:escrow",L:"ag3:log",S:"ag3:sessions",CF:"ag3:cfg",F:"ag3:files",EM:"ag3:emails" };
 
-const PW = { admin:"8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918", support:"1c8bfe8f801d79745c4631d09fff36c82aa37fc4cce4fc946683d7b336b63032", pass:"d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1" };
+const PW = { admin:"8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918", support:"a18603086e5bdf9df88ccc9f5a083fed093e819976e87456b74dafcbd7011114", pass:"d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1" };
 
 const SEED = {
   users: [
@@ -876,6 +876,7 @@ function ReviewStatus({ user }) {
           </div>
         ))}
       </Card>
+      <Btn variant="ghost" onClick={()=>{localStorage.removeItem("ag3_token");window.location.hash="/";window.location.reload();}} style={{marginTop:20}}>Log out</Btn>
     </div>
   );
 }
