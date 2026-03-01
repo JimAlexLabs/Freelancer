@@ -1,0 +1,41 @@
+# Run backend migrations (and optional seed) against Supabase on push
+# Supabase = your Postgres DB; this pushes schema/data to it.
+# Add secret: SUPABASE_DATABASE_URL (from Supabase → Settings → Database → Connection string URI)
+
+name: Deploy to Supabase (migrate)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+  workflow_dispatch:  # Run manually from Actions tab
+
+jobs:
+  migrate:
+    name: Migrate Supabase DB
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install backend deps
+        run: npm ci
+        working-directory: backend
+
+      - name: Run migrations
+        run: npm run migrate
+        working-directory: backend
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+
+      - name: Summary
+        run: echo "## Supabase migrations complete" >> $GITHUB_STEP_SUMMARY

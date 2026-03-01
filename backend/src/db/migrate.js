@@ -10,7 +10,7 @@ const migrations = [
 
   // ── 001: Extensions ─────────────────────────────────────────
   `CREATE EXTENSION IF NOT EXISTS "pgcrypto"`,
-  `CREATE EXTENSION IF NOT EXISTS "unaccent"`,
+  `DO $$ BEGIN CREATE EXTENSION IF NOT EXISTS "unaccent"; EXCEPTION WHEN OTHERS THEN NULL; END $$`,
 
   // ── 002: Enums ───────────────────────────────────────────────
   `DO $$ BEGIN

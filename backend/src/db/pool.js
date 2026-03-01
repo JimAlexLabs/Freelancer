@@ -5,17 +5,28 @@
 const { Pool } = require('pg');
 const logger = require('../utils/logger');
 
-const pool = new Pool({
-  host:     process.env.DB_HOST     || 'localhost',
-  port:     parseInt(process.env.DB_PORT || '5432'),
-  database: process.env.DB_NAME     || 'afrigig',
-  user:     process.env.DB_USER     || 'afrigig_user',
-  password: process.env.DB_PASSWORD || '',
-  ssl:      process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-  max:      20,          // max connections in pool
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
-});
+// Prefer DATABASE_URL (e.g. Supabase connection string); otherwise use DB_* vars
+const connectionConfig = process.env.DATABASE_URL
+  ? {
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_URL.includes('supabase') ? { rejectUnauthorized: false } : undefined,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    }
+  : {
+      host:     process.env.DB_HOST     || 'localhost',
+      port:     parseInt(process.env.DB_PORT || '5432'),
+      database: process.env.DB_NAME     || 'afrigig',
+      user:     process.env.DB_USER     || 'afrigig_user',
+      password: process.env.DB_PASSWORD || '',
+      ssl:      process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+      max:      20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
+    };
+
+const pool = new Pool(connectionConfig);
 
 // Log pool events in development
 pool.on('error', (err) => {
