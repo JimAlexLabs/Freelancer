@@ -1,0 +1,18 @@
+# MCP config may contain API tokens — do not commit
+.cursor/mcp.json
+
+# Dependencies and build
+node_modules/
+backend/node_modules/
+dist/
+
+# Env and secrets
+.env
+.env.local
+.env.*.local
+.env.deploy
+backend/.env
+
+# OS and editor
+.DS_Store
+*.log

@@ -683,19 +683,10 @@ function AuthPage({ mode, navigate, onLogin, toast }) {
             <Btn type="submit" loading={loading} style={{width:"100%",justifyContent:"center",marginTop:4}}>{isLogin?"Sign In →":"Create Account →"}</Btn>
           </form>
           <div style={{textAlign:"center",marginTop:16,fontSize:14,color:"var(--sub)"}}>
-            {isLogin?<span>New here? <button onClick={()=>navigate("/register")} style={{background:"none",border:"none",color:"var(--g)",cursor:"pointer",fontWeight:700}}>Register free</button></span>:<span>Have an account? <button onClick={()=>navigate("/login")} style={{background:"none",border:"none",color:"var(--g)",cursor:"pointer",fontWeight:700}}>Sign in</button></span>}
+            {isLogin
+              ? <span>New here? <button onClick={()=>navigate("/register")} style={{background:"none",border:"none",color:"var(--g)",cursor:"pointer",fontWeight:700}}>Register free</button></span>
+              : <span>Have an account? <button onClick={()=>navigate("/login")} style={{background:"none",border:"none",color:"var(--g)",cursor:"pointer",fontWeight:700}}>Sign in</button></span>}
           </div>
-          {isLogin&&(
-            <div style={{marginTop:18}}>
-              <div style={{fontSize:12,color:"var(--sub)",marginBottom:8,fontWeight:600,textTransform:"uppercase",letterSpacing:".04em"}}>Quick Login</div>
-              {[["admin@afrigig.com","admin","Admin","⬡"],["support@afrigig.com","support","Support Agent","🎫"],["kwame@afrigig.com","pass","Freelancer (Approved)","✅"],["amara@afrigig.com","pass","Freelancer (Under Review)","🔍"],["ngozi@afrigig.com","pass","Freelancer (New)","🆕"]].map(([email,pw,label,icon])=>(
-                <div key={email} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",background:"var(--surf)",borderRadius:8,marginBottom:6}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:14}}>{icon}</span><span style={{fontSize:13,fontWeight:600}}>{label}</span></div>
-                  <button className="btn bg2 bsm" onClick={()=>quickLogin(email,pw)} disabled={loading} style={{fontSize:11}}>Login →</button>
-                </div>
-              ))}
-            </div>
-          )}
         </Card>
       </div>
     </div>

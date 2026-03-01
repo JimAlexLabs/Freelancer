@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { Auth as ApiAuth, Users as ApiUsers } from "./api.js";
 
 /* AfriGig Platform v3.0 */
 
@@ -133,60 +134,71 @@ const SEED = {
 };
 
 async function seedIfEmpty() {
-  const existing = await db.get(K.U);
+  // Data is now seeded in PostgreSQL via `npm run seed` in /backend.
+  // Still seed the in-browser store for jobs/messages/tickets UI data.
+  const existing = await db.get(K.J);
   if (existing?.length) return false;
-  await db.set(K.U, SEED.users); await db.set(K.J, SEED.jobs); await db.set(K.W, SEED.wallets);
+  await db.set(K.J, SEED.jobs); await db.set(K.W, SEED.wallets);
   await db.set(K.TX, SEED.txn); await db.set(K.E, SEED.escrows); await db.set(K.T, SEED.tickets);
   await db.set(K.M, SEED.msgs); await db.set(K.C, SEED.convos); await db.set(K.CF, SEED.cfg);
   await db.set(K.A, []); await db.set(K.N, []); await db.set(K.L, []);
-  await db.set(K.S, []); await db.set(K.F, []); await db.set(K.EM, []);
+  await db.set(K.F, []); await db.set(K.EM, []);
   return true;
 }
 
+// ── Normalize backend user → frontend shape ───────────────────
+function normalizeUser(backendUser) {
+  const p = backendUser.profile || {};
+  return {
+    ...backendUser,
+    id:         backendUser.id,
+    name:       backendUser.name,
+    email:      backendUser.email,
+    role:       backendUser.role,
+    status:     backendUser.account_status || "active",
+    fs:         p.freelancer_status || backendUser.freelancer_status || null,
+    track:      p.track || backendUser.track || null,
+    skills:     Array.isArray(p.skills) ? p.skills.join(", ") : (p.skills || ""),
+    experience: p.experience || "",
+    availability: p.availability || "",
+    bio:        p.bio || "",
+    portfolio_links: Array.isArray(p.portfolio_links) ? p.portfolio_links.join(", ") : (p.portfolio_links || ""),
+    assessment_pct:      p.assessment_pct ?? backendUser.assessment_pct,
+    assessment_unlocked: p.assessment_unlocked ?? backendUser.assessment_unlocked ?? false,
+    queue_pos:           p.queue_position ?? null,
+    review_deadline:     p.review_deadline ?? null,
+    is_online:           p.is_online ?? false,
+  };
+}
+
 async function authLogin(email, pw) {
-  const users = (await db.get(K.U)) || [];
-  const u = users.find(x => x.email === email.trim().toLowerCase());
-  if (!u) return { error: "No account found with this email" };
-  const hash = await sha256(pw);
-  if (u.pw !== hash) return { error: "Incorrect password" };
-  if (u.status === "banned") return { error: "Account banned. Contact support@afrigig.com" };
-  if (u.status === "suspended") return { error: "Account suspended. Contact support." };
-  const token = `agv3_${u.id}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  const sessions = (await db.get(K.S)) || [];
-  sessions.push({ token, user_id:u.id, role:u.role, created_at:now(), expires_at:new Date(Date.now()+86400000).toISOString() });
-  await db.set(K.S, sessions.slice(-200));
-  await auditLog(u.id, "auth.login", `Logged in: ${email}`);
-  const { pw:_, ...safe } = u;
-  return { user:safe, token };
+  try {
+    const data = await ApiAuth.login(email, pw);
+    if (!data?.access_token) return { error: "Login failed" };
+    localStorage.setItem("ag3_access_token", data.access_token);
+    return { user: normalizeUser(data.user), token: data.access_token };
+  } catch (err) {
+    return { error: err.message || "Login failed" };
+  }
 }
 
 async function authRegister({ name, email, password }) {
-  const users = (await db.get(K.U)) || [];
-  if (users.find(u => u.email === email.trim().toLowerCase())) return { error: "Email already registered" };
-  if (!name?.trim()) return { error: "Full name required" };
-  if (!email?.includes("@")) return { error: "Valid email required" };
-  if ((password || "").length < 6) return { error: "Password must be at least 6 characters" };
-  const id = uid();
-  const hash = await sha256(password);
-  const user = { id, name:name.trim(), email:email.trim().toLowerCase(), pw:hash, role:"freelancer", status:"pending", fs:"REGISTERED", profile_complete:false, assessment_unlocked:false, track:null, created_at:now(), updated_at:now() };
-  users.push(user); await db.set(K.U, users);
-  const wallets = (await db.get(K.W)) || [];
-  wallets.push({ id:uid(), user_id:id, currency:"KES", balance:0 }); await db.set(K.W, wallets);
-  await createNotif(1, "user.registered", "New Freelancer Registered", `${name} created an account.`);
-  await auditLog(id, "auth.register", `New registration: ${email}`);
-  await sendEmail(id, "Welcome to AfriGig!", `Hi ${name}, welcome! Complete your profile to unlock your assessment.`);
-  return { user };
+  try {
+    const data = await ApiAuth.register(name, email, password);
+    return { user: data.user };
+  } catch (err) {
+    return { error: err.message || "Registration failed" };
+  }
 }
 
 async function getSession(token) {
   if (!token) return null;
-  const sessions = (await db.get(K.S)) || [];
-  const s = sessions.find(x => x.token === token);
-  if (!s || new Date(s.expires_at) < new Date()) return null;
-  const users = (await db.get(K.U)) || [];
-  const u = users.find(x => x.id === s.user_id);
-  if (!u) return null;
-  const { pw:_, ...safe } = u; return safe;
+  try {
+    const data = await ApiAuth.me();
+    return normalizeUser(data.user);
+  } catch {
+    return null;
+  }
 }
 
 async function createNotif(userId, type, title, message) {
@@ -636,66 +648,129 @@ function Landing({ navigate }) {
 
 // ─── AUTH PAGE ────────────────────────────────────────────────
 function AuthPage({ mode, navigate, onLogin, toast }) {
-  const [form, setForm] = useState({name:"",email:"",password:"",confirm:""});
+  const [form, setForm] = useState({ name:"", email:"", password:"", confirm:"" });
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState({});
-  const isLogin = mode==="login";
+  const isLogin = mode === "login";
 
   const validate = () => {
-    const e={};
-    if (!isLogin&&!form.name.trim()) e.name="Full name required";
-    if (!form.email.includes("@")) e.email="Valid email required";
-    if (form.password.length<6) e.password="At least 6 characters";
-    if (!isLogin&&form.password!==form.confirm) e.confirm="Passwords don't match";
-    setErrors(e); return !Object.keys(e).length;
+    const e = {};
+    if (!isLogin && !form.name.trim()) e.name = "Full name required";
+    if (!form.email.includes("@")) e.email = "Valid email required";
+    if (form.password.length < 6) e.password = "At least 6 characters";
+    if (!isLogin && form.password !== form.confirm) e.confirm = "Passwords don't match";
+    setErrors(e);
+    return !Object.keys(e).length;
   };
 
   const submit = async e => {
-    e.preventDefault(); if (!validate()) return;
+    e.preventDefault();
+    if (!validate()) return;
     setLoading(true);
-    const res = isLogin ? await authLogin(form.email, form.password) : await authRegister({name:form.name, email:form.email, password:form.password});
+    const res = isLogin
+      ? await authLogin(form.email, form.password)
+      : await authRegister({ name: form.name, email: form.email, password: form.password });
     setLoading(false);
-    if (res.error) { toast(res.error,"error"); return; }
-    if (isLogin) { localStorage.setItem("ag3_token",res.token); onLogin(res.user,res.token); toast(`Welcome back, ${res.user.name.split(" ")[0]}!`); }
-    else { toast("Account created! Please sign in."); navigate("/login"); }
-  };
-
-  const quickLogin = async (email,pw) => {
-    setLoading(true); const res=await authLogin(email,pw); setLoading(false);
-    if (res.error) { toast(res.error,"error"); return; }
-    localStorage.setItem("ag3_token",res.token); onLogin(res.user,res.token); toast(`Welcome back, ${res.user.name.split(" ")[0]}!`);
+    if (res.error) {
+      toast(res.error, "error");
+      return;
+    }
+    if (isLogin) {
+      onLogin(res.user, res.token);
+      toast(`Welcome back, ${res.user.name.split(" ")[0]}!`);
+    } else {
+      toast("Account created! Please check your email to verify, then sign in.");
+      navigate("/login");
+    }
   };
 
   return (
     <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#0C0F1A 0%,#162032 100%)",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
       <div style={{width:"100%",maxWidth:420}} className="au">
         <div style={{textAlign:"center",marginBottom:28}}>
-          <div style={{width:52,height:52,background:"linear-gradient(135deg,var(--g),var(--gd))",borderRadius:15,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 16px"}}><span style={{color:"#fff",fontSize:26,fontWeight:800,fontFamily:"var(--fh)"}}>A</span></div>
-          <h1 style={{fontFamily:"var(--fh)",fontWeight:800,fontSize:28,color:"#fff"}}>{isLogin?"Welcome back":"Join AfriGig"}</h1>
-          <p style={{color:"rgba(255,255,255,.4)",marginTop:6,fontSize:14}}>{isLogin?"Sign in to your account":"Create your free freelancer account"}</p>
+          <div style={{width:52,height:52,background:"linear-gradient(135deg,var(--g),var(--gd))",borderRadius:15,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 16px"}}>
+            <span style={{color:"#fff",fontSize:26,fontWeight:800,fontFamily:"var(--fh)"}}>A</span>
+          </div>
+          <h1 style={{fontFamily:"var(--fh)",fontWeight:800,fontSize:28,color:"#fff"}}>
+            {isLogin ? "Welcome back" : "Join AfriGig"}
+          </h1>
+          <p style={{color:"rgba(255,255,255,.4)",marginTop:6,fontSize:14}}>
+            {isLogin ? "Sign in to your account" : "Create your free freelancer account"}
+          </p>
         </div>
         <Card style={{padding:28}}>
           <form onSubmit={submit} style={{display:"flex",flexDirection:"column",gap:14}}>
-            {!isLogin&&<Inp label="Full Name" value={form.name} onChange={v=>setForm({...form,name:v})} placeholder="Amara Osei" required error={errors.name}/>}
-            <Inp label="Email Address" type="email" value={form.email} onChange={v=>setForm({...form,email:v})} placeholder="you@email.com" required error={errors.email}/>
-            <Inp label="Password" type="password" value={form.password} onChange={v=>setForm({...form,password:v})} placeholder="••••••••" required error={errors.password} hint={!isLogin?"Minimum 6 characters":undefined}/>
-            {!isLogin&&<Inp label="Confirm Password" type="password" value={form.confirm} onChange={v=>setForm({...form,confirm:v})} placeholder="••••••••" required error={errors.confirm}/>}
-            <Btn type="submit" loading={loading} style={{width:"100%",justifyContent:"center",marginTop:4}}>{isLogin?"Sign In →":"Create Account →"}</Btn>
+            {!isLogin && (
+              <Inp
+                label="Full Name"
+                value={form.name}
+                onChange={v => setForm({...form, name:v})}
+                placeholder="Amara Osei"
+                required
+                error={errors.name}
+              />
+            )}
+            <Inp
+              label="Email Address"
+              type="email"
+              value={form.email}
+              onChange={v => setForm({...form, email:v})}
+              placeholder="you@email.com"
+              required
+              error={errors.email}
+            />
+            <Inp
+              label="Password"
+              type="password"
+              value={form.password}
+              onChange={v => setForm({...form, password:v})}
+              placeholder="••••••••"
+              required
+              error={errors.password}
+              hint={!isLogin ? "Minimum 6 characters" : undefined}
+            />
+            {!isLogin && (
+              <Inp
+                label="Confirm Password"
+                type="password"
+                value={form.confirm}
+                onChange={v => setForm({...form, confirm:v})}
+                placeholder="••••••••"
+                required
+                error={errors.confirm}
+              />
+            )}
+            <Btn
+              type="submit"
+              loading={loading}
+              style={{width:"100%",justifyContent:"center",marginTop:4}}
+            >
+              {isLogin ? "Sign In →" : "Create Account →"}
+            </Btn>
           </form>
           <div style={{textAlign:"center",marginTop:16,fontSize:14,color:"var(--sub)"}}>
-            {isLogin?<span>New here? <button onClick={()=>navigate("/register")} style={{background:"none",border:"none",color:"var(--g)",cursor:"pointer",fontWeight:700}}>Register free</button></span>:<span>Have an account? <button onClick={()=>navigate("/login")} style={{background:"none",border:"none",color:"var(--g)",cursor:"pointer",fontWeight:700}}>Sign in</button></span>}
+            {isLogin ? (
+              <span>
+                New here?{" "}
+                <button
+                  onClick={() => navigate("/register")}
+                  style={{background:"none",border:"none",color:"var(--g)",cursor:"pointer",fontWeight:700}}
+                >
+                  Register free
+                </button>
+              </span>
+            ) : (
+              <span>
+                Have an account?{" "}
+                <button
+                  onClick={() => navigate("/login")}
+                  style={{background:"none",border:"none",color:"var(--g)",cursor:"pointer",fontWeight:700}}
+                >
+                  Sign in
+                </button>
+              </span>
+            )}
           </div>
-          {isLogin&&(
-            <div style={{marginTop:18}}>
-              <div style={{fontSize:12,color:"var(--sub)",marginBottom:8,fontWeight:600,textTransform:"uppercase",letterSpacing:".04em"}}>Quick Login</div>
-              {[["admin@afrigig.com","admin","Admin","⬡"],["support@afrigig.com","support","Support Agent","🎫"],["kwame@afrigig.com","pass","Freelancer (Approved)","✅"],["amara@afrigig.com","pass","Freelancer (Under Review)","🔍"],["ngozi@afrigig.com","pass","Freelancer (New)","🆕"]].map(([email,pw,label,icon])=>(
-                <div key={email} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",background:"var(--surf)",borderRadius:8,marginBottom:6}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:14}}>{icon}</span><span style={{fontSize:13,fontWeight:600}}>{label}</span></div>
-                  <button className="btn bg2 bsm" onClick={()=>quickLogin(email,pw)} disabled={loading} style={{fontSize:11}}>Login →</button>
-                </div>
-              ))}
-            </div>
-          )}
         </Card>
       </div>
     </div>
@@ -704,55 +779,158 @@ function AuthPage({ mode, navigate, onLogin, toast }) {
 
 // ─── ONBOARDING ───────────────────────────────────────────────
 function Onboarding({ user, onUpdateUser, toast }) {
-  const fs=user.fs;
-  if (fs==="APPROVED") return null;
-  if (fs==="REJECTED"||fs==="SUSPENDED") return <StatusPage user={user}/>;
-  const steps=[{key:"REGISTERED",label:"Account Created"},{key:"PROFILE_COMPLETED",label:"Complete Profile"},{key:"ASSESSMENT_PENDING",label:"Unlock Assessment"},{key:"UNDER_REVIEW",label:"Expert Review"},{key:"APPROVED",label:"Start Working"}];
-  const idx=steps.findIndex(s=>s.key===fs);
-  const pct=Math.max(0,(idx/(steps.length-1))*100);
+  const fs = user.fs;
+  if (fs === "APPROVED") return null;
+  if (fs === "REJECTED" || fs === "SUSPENDED") return <StatusPage user={user} />;
+
+  const steps = [
+    { key: "REGISTERED",          label: "Account Created" },
+    { key: "PROFILE_COMPLETED",   label: "Complete Profile" },
+    { key: "ASSESSMENT_PENDING",  label: "Unlock Assessment" },
+    { key: "UNDER_REVIEW",        label: "Expert Review" },
+    { key: "APPROVED",            label: "Start Working" },
+  ];
+  const idx = steps.findIndex(s => s.key === fs);
+  const pct = Math.max(0, (idx / (steps.length - 1)) * 100);
+
   return (
     <div style={{minHeight:"100vh",background:"var(--surf)",display:"flex"}}>
       <div style={{width:280,background:"linear-gradient(180deg,#0C0F1A 0%,#162032 100%)",padding:"40px 28px",display:"flex",flexDirection:"column",flexShrink:0}}>
-        <div style={{marginBottom:44}}><div style={{fontFamily:"var(--fh)",fontWeight:800,fontSize:22,color:"#fff"}}>AfriGig</div><div style={{fontSize:12,color:"rgba(255,255,255,.3)",marginTop:3}}>Freelancer Onboarding</div></div>
+        <div style={{marginBottom:44}}>
+          <div style={{fontFamily:"var(--fh)",fontWeight:800,fontSize:22,color:"#fff"}}>AfriGig</div>
+          <div style={{fontSize:12,color:"rgba(255,255,255,.3)",marginTop:3}}>Freelancer Onboarding</div>
+        </div>
         <div style={{flex:1}}>
-          {steps.map((s,i)=>{
-            const done=idx>i; const active=fs===s.key;
+          {steps.map((s, i) => {
+            const done = idx > i;
+            const active = fs === s.key;
             return (
-              <div key={s.key} style={{display:"flex",alignItems:"center",gap:14,marginBottom:26,opacity:done||active?1:.32}}>
-                <div style={{width:32,height:32,borderRadius:"50%",background:done?"var(--g)":active?"rgba(0,212,160,.15)":"rgba(255,255,255,.06)",border:active?"2px solid var(--g)":"none",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>
-                  <span style={{fontSize:12,fontWeight:800,color:done?"#fff":active?"var(--g)":"rgba(255,255,255,.3)"}}>{done?"✓":i+1}</span>
+              <div
+                key={s.key}
+                style={{
+                  display:"flex",
+                  alignItems:"center",
+                  gap:14,
+                  marginBottom:26,
+                  opacity: done || active ? 1 : .32,
+                }}
+              >
+                <div
+                  style={{
+                    width:32,
+                    height:32,
+                    borderRadius:"50%",
+                    background: done
+                      ? "var(--g)"
+                      : active
+                      ? "rgba(0,212,160,.15)"
+                      : "rgba(255,255,255,.06)",
+                    border: active ? "2px solid var(--g)" : "none",
+                    display:"flex",
+                    alignItems:"center",
+                    justifyContent:"center",
+                    flexShrink:0,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize:12,
+                      fontWeight:800,
+                      color: done
+                        ? "#fff"
+                        : active
+                        ? "var(--g)"
+                        : "rgba(255,255,255,.3)",
+                    }}
+                  >
+                    {done ? "✓" : i + 1}
+                  </span>
                 </div>
-                <span style={{fontSize:14,color:active?"#fff":done?"rgba(255,255,255,.65)":"rgba(255,255,255,.32)",fontWeight:active?700:400}}>{s.label}</span>
+                <span
+                  style={{
+                    fontSize:14,
+                    color: active
+                      ? "#fff"
+                      : done
+                      ? "rgba(255,255,255,.65)"
+                      : "rgba(255,255,255,.32)",
+                    fontWeight: active ? 700 : 400,
+                  }}
+                >
+                  {s.label}
+                </span>
               </div>
             );
           })}
         </div>
         <div>
           <div style={{fontSize:12,color:"rgba(255,255,255,.3)",marginBottom:6}}>Progress</div>
-          <div className="pb" style={{background:"rgba(255,255,255,.1)"}}><div className="pf" style={{width:`${pct}%`}}/></div>
-          <div style={{fontSize:12,color:"rgba(255,255,255,.3)",marginTop:5}}>{Math.round(pct)}% complete</div>
+          <div className="pb" style={{background:"rgba(255,255,255,.1)"}}>
+            <div className="pf" style={{width:`${pct}%`}}/>
+          </div>
+          <div style={{fontSize:12,color:"rgba(255,255,255,.3)",marginTop:5}}>
+            {Math.round(pct)}% complete
+          </div>
         </div>
       </div>
       <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:"40px 24px",overflowY:"auto"}}>
-        {fs==="REGISTERED"&&<ProfileStep user={user} onSave={onUpdateUser} toast={toast}/>}
-        {fs==="PROFILE_COMPLETED"&&<TrackStep user={user} onSave={onUpdateUser} toast={toast}/>}
-        {fs==="ASSESSMENT_PENDING"&&<PaymentStep user={user} onUnlock={onUpdateUser} toast={toast}/>}
-        {(fs==="ASSESSMENT_SUBMITTED"||fs==="UNDER_REVIEW")&&<ReviewStatus user={user}/>}
+        {fs === "REGISTERED"         && <ProfileStep  user={user} onSave={onUpdateUser} toast={toast} />}
+        {fs === "PROFILE_COMPLETED"  && <TrackStep    user={user} onSave={onUpdateUser} toast={toast} />}
+        {fs === "ASSESSMENT_PENDING" && <PaymentStep  user={user} onUnlock={onUpdateUser} toast={toast} />}
+        {(fs === "ASSESSMENT_SUBMITTED" || fs === "UNDER_REVIEW") && (
+          <ReviewStatus user={user} />
+        )}
       </div>
     </div>
   );
 }
 
 function ProfileStep({ user, onSave, toast }) {
-  const [form, setForm] = useState({skills:user.skills||"",experience:user.experience||"",availability:user.availability||"Full-time",country:user.country||"",timezone:"Africa/Nairobi",bio:user.bio||"",portfolio_links:user.portfolio_links||""});
+  const [form, setForm] = useState({
+    skills:          user.skills || "",
+    experience:      user.experience || "",
+    availability:    user.availability || "Full-time",
+    country:         user.country || "",
+    timezone:        "Africa/Nairobi",
+    bio:             user.bio || "",
+    portfolio_links: user.portfolio_links || "",
+  });
   const [cvFile, setCvFile] = useState(null);
   const [loading, setLoading] = useState(false);
+
   const save = async () => {
-    if (!form.skills||!form.experience||!form.country) return toast("Skills, experience and country are required","error");
-    setLoading(true); await new Promise(r=>setTimeout(r,600));
-    const users=(await db.get(K.U))||[];
-    const i=users.findIndex(u=>u.id===user.id);
-    if (i!==-1) { users[i]={...users[i],...form,fs:"PROFILE_COMPLETED",profile_complete:true,updated_at:now()}; await db.set(K.U,users); if(cvFile){const files=(await db.get(K.F))||[];files.push({id:uid(),user_id:user.id,type:"cv",...cvFile});await db.set(K.F,files);} await auditLog(user.id,"profile.complete","Profile completed"); toast("Profile saved!","success"); onSave({...user,...form,fs:"PROFILE_COMPLETED"}); }
+    if (!form.skills || !form.experience || !form.country) {
+      return toast("Skills, experience and country are required","error");
+    }
+    setLoading(true);
+    try {
+      const skillsArr =
+        form.skills
+          .split(",")
+          .map(s => s.trim())
+          .filter(Boolean);
+
+      await ApiUsers.updateProfile({
+        skills:          skillsArr,
+        experience:      form.experience,
+        availability:    form.availability,
+        bio:             form.bio,
+        portfolio_links: form.portfolio_links ? [form.portfolio_links] : [],
+        country:         form.country,
+      });
+
+      // TODO: upload CV via a real file endpoint; currently ignored in API layer
+      if (cvFile) {
+        // placeholder for future backend file upload integration
+      }
+
+      const me = await ApiAuth.me();
+      const updated = normalizeUser(me.user);
+      toast("Profile saved!","success");
+      onSave(updated);
+    } catch (err) {
+      toast(err.message || "Failed to save profile","error");
+    }
     setLoading(false);
   };
   return (
@@ -781,9 +959,15 @@ function TrackStep({ user, onSave, toast }) {
   const save = async () => {
     if (!sel) return toast("Please select your track","error");
     setLoading(true);
-    const users=(await db.get(K.U))||[];
-    const i=users.findIndex(u=>u.id===user.id);
-    if (i!==-1) { users[i]={...users[i],track:sel,fs:"ASSESSMENT_PENDING",updated_at:now()}; await db.set(K.U,users); toast("Track selected!","success"); onSave({...user,track:sel,fs:"ASSESSMENT_PENDING"}); }
+    try {
+      await ApiUsers.setTrack(sel);
+      const me = await ApiAuth.me();
+      const updated = normalizeUser(me.user);
+      toast("Track selected!","success");
+      onSave(updated);
+    } catch (err) {
+      toast(err.message || "Failed to set track","error");
+    }
     setLoading(false);
   };
   const secs={software:"Core (10) + Tech MCQ (5) + 2 Coding Challenges",uiux:"Core (10) + Design MCQ (5) + Design Task",data:"Core (10) + Data MCQ (5) + SQL Challenge",devops:"Core (10) + DevOps MCQ (5) + Scenario Task",writing:"Core (10) + Writing MCQ (5) + Writing Task",nontech:"Core (10) + Operations MCQ (5) + Situational Task"};
@@ -876,7 +1060,7 @@ function ReviewStatus({ user }) {
           </div>
         ))}
       </Card>
-      <Btn variant="ghost" onClick={()=>{localStorage.removeItem("ag3_token");window.location.hash="/";window.location.reload();}} style={{marginTop:20}}>Log out</Btn>
+      <Btn variant="ghost" onClick={()=>{localStorage.removeItem("ag3_access_token");window.location.hash="/";window.location.reload();}} style={{marginTop:20}}>Log out</Btn>
     </div>
   );
 }
@@ -1125,7 +1309,7 @@ function AdminApp({ user, view, onNav, toast, notifs, unread, markRead, markAllR
   };
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
-      <Sidebar role="admin" active={view} onNav={onNav} user={user} onLogout={()=>{localStorage.removeItem("ag3_token");window.location.hash="/";window.location.reload();}} unread={unread} counts={counts}/>
+      <Sidebar role="admin" active={view} onNav={onNav} user={user} onLogout={()=>{localStorage.removeItem("ag3_access_token");window.location.hash="/";window.location.reload();}} unread={unread} counts={counts}/>
       <div style={{marginLeft:244,flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
         <Topbar user={user} unread={unread} notifs={notifs} onMarkRead={markRead} onMarkAll={markAllRead} title={titles[view]||"Dashboard"}/>
         <div key={view} style={{flex:1,padding:"26px 28px",overflowY:"auto"}} className="au">{views[view]||views.dashboard}</div>
@@ -1521,7 +1705,7 @@ function FreelancerApp({ user, view, onNav, toast, notifs, unread, markRead, mar
   };
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
-      <Sidebar role="freelancer" active={view} onNav={onNav} user={user} onLogout={()=>{localStorage.removeItem("ag3_token");window.location.hash="/";window.location.reload();}} unread={unread}/>
+      <Sidebar role="freelancer" active={view} onNav={onNav} user={user} onLogout={()=>{localStorage.removeItem("ag3_access_token");window.location.hash="/";window.location.reload();}} unread={unread}/>
       <div style={{marginLeft:244,flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
         <Topbar user={user} unread={unread} notifs={notifs} onMarkRead={markRead} onMarkAll={markAllRead} title={titles[view]||"Dashboard"}/>
         <div key={view} style={{flex:1,padding:"26px 28px",overflowY:"auto"}} className="au">{views[view]||views.dashboard}</div>
@@ -1754,7 +1938,7 @@ function SupportApp({ user, view, onNav, toast, notifs, unread, markRead, markAl
   const views={dashboard:<SupportDashboard/>,tickets:<TicketsView user={user} toast={toast}/>,messages:<MessagesView user={user} toast={toast}/>,users:<AllUsers toast={toast}/>,reviews:<FRReviews toast={toast}/>};
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
-      <Sidebar role="support" active={view} onNav={onNav} user={user} onLogout={()=>{localStorage.removeItem("ag3_token");window.location.hash="/";window.location.reload();}} unread={unread} counts={counts}/>
+      <Sidebar role="support" active={view} onNav={onNav} user={user} onLogout={()=>{localStorage.removeItem("ag3_access_token");window.location.hash="/";window.location.reload();}} unread={unread} counts={counts}/>
       <div style={{marginLeft:244,flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
         <Topbar user={user} unread={unread} notifs={notifs} onMarkRead={markRead} onMarkAll={markAllRead} title={titles[view]||"Dashboard"}/>
         <div key={view} style={{flex:1,padding:"26px 28px",overflowY:"auto"}} className="au">{views[view]||views.dashboard}</div>
@@ -1792,8 +1976,8 @@ export default function AfriGigApp() {
   useEffect(()=>{
     (async()=>{
       await seedIfEmpty();
-      const token=localStorage.getItem("ag3_token");
-      if(token){const u=await getSession(token);if(u)setUser(u);else localStorage.removeItem("ag3_token");}
+      const token=localStorage.getItem("ag3_access_token");
+      if(token){const u=await getSession(token);if(u)setUser(u);else localStorage.removeItem("ag3_access_token");}
       setLoading(false);
     })();
   },[]);
