@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { Auth as ApiAuth, Users as ApiUsers } from "./api.js";
+import { supabase } from "./supabaseClient.js";
 
 /* AfriGig Platform v3.0 */
 
@@ -195,8 +196,7 @@ async function authRegister({ name, email, password }) {
   }
 }
 
-async function getSession(token) {
-  if (!token) return null;
+async function getSession() {
   try {
     const data = await ApiAuth.me();
     return normalizeUser(data.user);
@@ -1975,12 +1975,28 @@ export default function AfriGigApp() {
   const { notifs, unread, markRead, markAllRead } = useNotifs(user?.id);
 
   useEffect(()=>{
+    let sub;
     (async()=>{
       await seedIfEmpty();
-      const token=localStorage.getItem("ag3_access_token");
-      if(token){const u=await getSession(token);if(u)setUser(u);else localStorage.removeItem("ag3_access_token");}
+      // Restore session from Supabase
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user) {
+        const u = normalizeUser(session.user);
+        setUser(u);
+      }
       setLoading(false);
+
+      // Listen for auth changes (login/logout/token refresh)
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        if (session?.user) {
+          setUser(normalizeUser(session.user));
+        } else {
+          setUser(null);
+        }
+      });
+      sub = subscription;
     })();
+    return () => sub?.unsubscribe();
   },[]);
 
   useEffect(()=>{
