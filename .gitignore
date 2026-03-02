@@ -4,6 +4,7 @@
 # Dependencies and build
 node_modules/
 backend/node_modules/
+_backend-legacy/node_modules/
 dist/
 
 # Env and secrets
@@ -12,6 +13,7 @@ dist/
 .env.*.local
 .env.deploy
 backend/.env
+_backend-legacy/.env
 
 # OS and editor
 .DS_Store

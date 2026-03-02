@@ -146,28 +146,30 @@ async function seedIfEmpty() {
   return true;
 }
 
-// ── Normalize backend user → frontend shape ───────────────────
-function normalizeUser(backendUser) {
-  const p = backendUser.profile || {};
+// ── Normalize Supabase user → frontend shape ─────────────────
+function normalizeUser(supabaseUser) {
+  if (!supabaseUser) return null;
+  // Supabase stores extra fields in user_metadata
+  const m = supabaseUser.user_metadata || {};
   return {
-    ...backendUser,
-    id:         backendUser.id,
-    name:       backendUser.name,
-    email:      backendUser.email,
-    role:       backendUser.role,
-    status:     backendUser.account_status || "active",
-    fs:         p.freelancer_status || backendUser.freelancer_status || null,
-    track:      p.track || backendUser.track || null,
-    skills:     Array.isArray(p.skills) ? p.skills.join(", ") : (p.skills || ""),
-    experience: p.experience || "",
-    availability: p.availability || "",
-    bio:        p.bio || "",
-    portfolio_links: Array.isArray(p.portfolio_links) ? p.portfolio_links.join(", ") : (p.portfolio_links || ""),
-    assessment_pct:      p.assessment_pct ?? backendUser.assessment_pct,
-    assessment_unlocked: p.assessment_unlocked ?? backendUser.assessment_unlocked ?? false,
-    queue_pos:           p.queue_position ?? null,
-    review_deadline:     p.review_deadline ?? null,
-    is_online:           p.is_online ?? false,
+    id:                  supabaseUser.id,
+    name:                m.name || m.full_name || supabaseUser.email?.split("@")[0] || "User",
+    email:               supabaseUser.email,
+    role:                m.role || "freelancer",
+    status:              m.account_status || "active",
+    fs:                  m.freelancer_status || null,
+    track:               m.track || null,
+    skills:              Array.isArray(m.skills) ? m.skills.join(", ") : (m.skills || ""),
+    experience:          m.experience || "",
+    availability:        m.availability || "",
+    bio:                 m.bio || "",
+    portfolio_links:     Array.isArray(m.portfolio_links) ? m.portfolio_links.join(", ") : (m.portfolio_links || ""),
+    country:             m.country || "",
+    assessment_pct:      m.assessment_pct ?? null,
+    assessment_unlocked: m.assessment_unlocked ?? false,
+    queue_pos:           m.queue_position ?? null,
+    review_deadline:     m.review_deadline ?? null,
+    is_online:           m.is_online ?? false,
   };
 }
 
@@ -185,7 +187,9 @@ async function authLogin(email, pw) {
 async function authRegister({ name, email, password }) {
   try {
     const data = await ApiAuth.register(name, email, password);
-    return { user: data.user };
+    // Supabase returns the user; normalize to app shape
+    const user = data.user ? normalizeUser(data.user) : null;
+    return { user };
   } catch (err) {
     return { error: err.message || "Registration failed" };
   }
@@ -910,7 +914,7 @@ function ProfileStep({ user, onSave, toast }) {
           .map(s => s.trim())
           .filter(Boolean);
 
-      await ApiUsers.updateProfile({
+      const profileResult = await ApiUsers.updateProfile({
         skills:          skillsArr,
         experience:      form.experience,
         availability:    form.availability,
@@ -919,13 +923,11 @@ function ProfileStep({ user, onSave, toast }) {
         country:         form.country,
       });
 
-      // TODO: upload CV via a real file endpoint; currently ignored in API layer
       if (cvFile) {
-        // placeholder for future backend file upload integration
+        // CV upload via Supabase Storage can be added here
       }
 
-      const me = await ApiAuth.me();
-      const updated = normalizeUser(me.user);
+      const updated = normalizeUser(profileResult.user);
       toast("Profile saved!","success");
       onSave(updated);
     } catch (err) {
@@ -960,9 +962,8 @@ function TrackStep({ user, onSave, toast }) {
     if (!sel) return toast("Please select your track","error");
     setLoading(true);
     try {
-      await ApiUsers.setTrack(sel);
-      const me = await ApiAuth.me();
-      const updated = normalizeUser(me.user);
+      const trackResult = await ApiUsers.setTrack(sel);
+      const updated = normalizeUser(trackResult.user);
       toast("Track selected!","success");
       onSave(updated);
     } catch (err) {

@@ -1,6 +1,9 @@
 // api.js — AfriGig Frontend API Client
-// Drop this file into your frontend project (same folder as afrigig-v3.jsx)
-// Vite: configure backend URL via VITE_API_URL in .env
+// Original implementation talked to a custom Node backend.
+// This version gradually migrates auth to Supabase while leaving
+// other domains (jobs, tickets, etc.) on the existing API for now.
+
+import { supabase } from "./supabaseClient.js";
 
 const BASE =
   (typeof import.meta !== "undefined" &&
@@ -89,63 +92,122 @@ async function refreshAccessToken() {
   }
 }
 
-// ── Auth ─────────────────────────────────────────────────────
+// ── Auth (Supabase) ─────────────────────────────────────────
 export const Auth = {
   async register(name, email, password) {
-    return api('POST', '/auth/register', { name, email, password });
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { name } },
+    });
+    if (error) throw new ApiError(error.message, 400);
+    return { user: data.user };
   },
 
   async login(email, password) {
-    const data = await api('POST', '/auth/login', { email, password });
-    if (data?.access_token) setToken(data.access_token);
-    return data;
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+    if (error) throw new ApiError(error.message, 400);
+    const { session, user } = data;
+    if (session?.access_token) setToken(session.access_token);
+    return { access_token: session?.access_token, user };
   },
 
   async logout() {
-    try { await api('POST', '/auth/logout'); } catch {}
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // ignore
+    }
     clearToken();
   },
 
   async logoutAll() {
-    await api('POST', '/auth/logout-all');
-    clearToken();
+    // Supabase does not support "logout all sessions" from the client directly.
+    // Best-effort logout of current session.
+    await Auth.logout();
   },
 
   async me() {
-    return api('GET', '/auth/me');
+    const { data, error } = await supabase.auth.getUser();
+    if (error) throw new ApiError(error.message, 401);
+    return { user: data.user };
   },
 
   async verifyEmail(token) {
-    return api('GET', `/auth/verify-email?token=${token}`);
+    // Email verification is handled via Supabase magic links.
+    // Frontend does not need to call a separate verify endpoint here.
+    throw new ApiError("Email verification handled via Supabase links", 400);
   },
 
   async resendVerification(email) {
-    return api('POST', '/auth/resend-verification', { email });
+    const { error } = await supabase.auth.resend({
+      type: "signup",
+      email,
+    });
+    if (error) throw new ApiError(error.message, 400);
+    return { ok: true };
   },
 
   async forgotPassword(email) {
-    return api('POST', '/auth/forgot-password', { email });
+    const redirectTo =
+      (typeof window !== "undefined" && window.location.origin + "/#/reset") ||
+      undefined;
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo,
+    });
+    if (error) throw new ApiError(error.message, 400);
+    return { ok: true };
   },
 
   async resetPassword(token, password) {
-    return api('POST', '/auth/reset-password', { token, password });
+    // Supabase handles password reset via the magic link; new password
+    // is set after verifying the link. This stub keeps API shape.
+    throw new ApiError("Reset password flow handled via Supabase link", 400);
   },
 
   async changePassword(current_password, new_password) {
-    return api('POST', '/auth/change-password', { current_password, new_password });
+    const {
+      data: { user },
+      error: getUserError,
+    } = await supabase.auth.getUser();
+    if (getUserError || !user) {
+      throw new ApiError("Not authenticated", 401);
+    }
+    const { error } = await supabase.auth.updateUser({
+      password: new_password,
+    });
+    if (error) throw new ApiError(error.message, 400);
+    return { ok: true };
   },
 };
 
-// ── Users / Profile ──────────────────────────────────────────
+// ── Users / Profile (Supabase) ──────────────────────────────
 export const Users = {
-  async getProfile(id) {
-    return api('GET', `/users/profile/${id}`);
+  async getProfile(_id) {
+    const { data, error } = await supabase.auth.getUser();
+    if (error) throw new ApiError(error.message, 401);
+    return { user: data.user };
   },
-  async updateProfile(data) {
-    return api('PATCH', '/users/profile', data);
+
+  async updateProfile(profileData) {
+    const { error } = await supabase.auth.updateUser({
+      data: profileData,
+    });
+    if (error) throw new ApiError(error.message, 400);
+    const { data } = await supabase.auth.getUser();
+    return { user: data.user };
   },
+
   async setTrack(track) {
-    return api('PATCH', '/users/profile/track', { track });
+    const { error } = await supabase.auth.updateUser({
+      data: { track },
+    });
+    if (error) throw new ApiError(error.message, 400);
+    const { data } = await supabase.auth.getUser();
+    return { user: data.user };
   },
 };
 

@@ -1,0 +1,3 @@
+-- AfriGig: first Supabase CLI migration (placeholder).
+-- Your schema is applied via backend: npm run migrate (Node) or run migrations from backend/src/db/migrate.js.
+-- Add SQL here if you want to manage schema via Supabase CLI instead.
