@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { Auth as ApiAuth, Users as ApiUsers } from "./api.js";
 import { supabase } from "./supabaseClient.js";
+import { db, K, getAdminId, getAdminProfile } from "./supabaseData.js";
 
 /* AfriGig Platform v3.0 */
 
@@ -85,14 +86,6 @@ async function sha256(str) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-const db = {
-  async get(k) { try { const r = await window.storage.get(k); return r ? JSON.parse(r.value) : null; } catch { return null; } },
-  async set(k, v) { try { await window.storage.set(k, JSON.stringify(v)); } catch {} },
-  async push(k, item) { const l = (await this.get(k)) || []; l.push(item); await this.set(k, l); return item; },
-  async patch(k, id, upd) { const l = (await this.get(k)) || []; const i = l.findIndex(x => x.id === id); if (i < 0) return null; l[i] = { ...l[i], ...upd, updated_at: now() }; await this.set(k, l); return l[i]; },
-};
-
-const K = { U:"ag3:users",J:"ag3:jobs",A:"ag3:apps",M:"ag3:msgs",C:"ag3:convos",N:"ag3:notifs",T:"ag3:tickets",TX:"ag3:txn",W:"ag3:wallets",E:"ag3:escrow",L:"ag3:log",S:"ag3:sessions",CF:"ag3:cfg",F:"ag3:files",EM:"ag3:emails" };
 
 const PW = { admin:"8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918", support:"a18603086e5bdf9df88ccc9f5a083fed093e819976e87456b74dafcbd7011114", pass:"d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1" };
 
@@ -135,15 +128,11 @@ const SEED = {
 };
 
 async function seedIfEmpty() {
-  // Data is now seeded in PostgreSQL via `npm run seed` in /backend.
-  // Still seed the in-browser store for jobs/messages/tickets UI data.
+  // Supabase: only seed jobs and config when empty. Wallets/tickets/etc use UUIDs and are created by seed script or app.
   const existing = await db.get(K.J);
   if (existing?.length) return false;
-  await db.set(K.J, SEED.jobs); await db.set(K.W, SEED.wallets);
-  await db.set(K.TX, SEED.txn); await db.set(K.E, SEED.escrows); await db.set(K.T, SEED.tickets);
-  await db.set(K.M, SEED.msgs); await db.set(K.C, SEED.convos); await db.set(K.CF, SEED.cfg);
-  await db.set(K.A, []); await db.set(K.N, []); await db.set(K.L, []);
-  await db.set(K.F, []); await db.set(K.EM, []);
+  await db.set(K.J, SEED.jobs);
+  await db.set(K.CF, SEED.cfg);
   return true;
 }
 
@@ -210,9 +199,16 @@ async function createNotif(userId, type, title, message) {
 }
 
 async function sendEmail(userId, subject, body) {
-  const users = (await db.get(K.U)) || [];
-  const u = users.find(x => x.id === userId);
-  await db.push(K.EM, { id:uid(), to:u?.email || userId, subject, body, sent_at:now(), status:"sent" });
+  let toAddr = userId;
+  if (userId === 1 || userId === "1") {
+    const admin = await getAdminProfile();
+    toAddr = admin?.email || "admin@afrigig.com";
+  } else {
+    const users = (await db.get(K.U)) || [];
+    const u = users.find(x => x.id === userId);
+    toAddr = u?.email || userId;
+  }
+  await db.push(K.EM, { id:uid(), to:toAddr, subject, body, sent_at:now(), status:"sent" });
 }
 
 async function auditLog(userId, type, desc) {
@@ -229,6 +225,9 @@ const TRACKS = {
   writing:{ id:"writing", label:"Technical Writing", icon:"✍️", desc:"Documentation, content, technical communication", color:"#EC4899" },
   nontech:{ id:"nontech", label:"Non-Technical / Admin", icon:"🗂️", desc:"Project management, admin, operations", color:"#6366F1" },
 };
+// Static assessment fee (KES) per track – by weight of assessment
+const ASSESSMENT_FEE_BY_TRACK = { software: 1500, uiux: 1200, data: 1500, devops: 1500, writing: 1000, nontech: 1000 };
+const DEFAULT_ASSESSMENT_FEE = 1500;
 
 const CORE_QS = [
   { id:"c1", cat:"Communication", q:"A client provides vague requirements. Your first action?", opts:["Ask targeted clarifying questions before starting","Make assumptions and proceed","Wait for more detail","Suggest a different scope"], correct:0, pts:10 },
@@ -573,7 +572,7 @@ function Landing({ navigate }) {
   const stats=[["2,400+","Verified Freelancers"],["KES 120M+","Paid Out"],["840","Projects Completed"],["12","African Countries"]];
   const faqs=[
     ["How long does approval take?","10–15 business days. You get real-time status updates and can track your queue position live."],
-    ["What is the assessment fee?","KES 1,000–2,000 via M-Pesa or Stripe. It covers expert review and platform costs."],
+    ["What is the assessment fee?","A fixed fee per track (e.g. Data & Analytics KES 1,500, Technical Writing KES 1,000) via M-Pesa or Stripe. Covers expert review."],
     ["What tracks are available?","Software Dev, UI/UX Design, Data & Analytics, DevOps & Cloud, Technical Writing, and Non-Technical/Admin."],
     ["How does the coding challenge work?","For tech tracks you get 1–2 real coding problems with test cases, similar to Codility or LeetCode, run in your chosen language."],
     ["How are payments protected?","All payments are held in escrow and released only when the client approves the deliverable."],
@@ -782,8 +781,8 @@ function AuthPage({ mode, navigate, onLogin, toast }) {
 }
 
 // ─── ONBOARDING ───────────────────────────────────────────────
-function Onboarding({ user, onUpdateUser, toast }) {
-  const fs = user.fs;
+function Onboarding({ user, onUpdateUser, onLogout, toast }) {
+  const fs = user.fs || "REGISTERED";
   if (fs === "APPROVED") return null;
   if (fs === "REJECTED" || fs === "SUSPENDED") return <StatusPage user={user} />;
 
@@ -794,8 +793,8 @@ function Onboarding({ user, onUpdateUser, toast }) {
     { key: "UNDER_REVIEW",        label: "Expert Review" },
     { key: "APPROVED",            label: "Start Working" },
   ];
-  const idx = steps.findIndex(s => s.key === fs);
-  const pct = Math.max(0, (idx / (steps.length - 1)) * 100);
+  const idx = Math.max(0, steps.findIndex(s => s.key === fs));
+  const pct = steps.length > 1 ? Math.round((idx / (steps.length - 1)) * 100) : 0;
 
   return (
     <div style={{minHeight:"100vh",background:"var(--surf)",display:"flex"}}>
@@ -873,16 +872,19 @@ function Onboarding({ user, onUpdateUser, toast }) {
             <div className="pf" style={{width:`${pct}%`}}/>
           </div>
           <div style={{fontSize:12,color:"rgba(255,255,255,.3)",marginTop:5}}>
-            {Math.round(pct)}% complete
+            {pct}% complete
           </div>
         </div>
+        {onLogout && (
+          <button type="button" onClick={onLogout} style={{marginTop:20,background:"none",border:"none",color:"rgba(255,255,255,.5)",cursor:"pointer",fontSize:13}}>Log out</button>
+        )}
       </div>
       <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:"40px 24px",overflowY:"auto"}}>
-        {fs === "REGISTERED"         && <ProfileStep  user={user} onSave={onUpdateUser} toast={toast} />}
+        {(fs === "REGISTERED" || !user.fs) && <ProfileStep  user={user} onSave={onUpdateUser} toast={toast} />}
         {fs === "PROFILE_COMPLETED"  && <TrackStep    user={user} onSave={onUpdateUser} toast={toast} />}
         {fs === "ASSESSMENT_PENDING" && <PaymentStep  user={user} onUnlock={onUpdateUser} toast={toast} />}
         {(fs === "ASSESSMENT_SUBMITTED" || fs === "UNDER_REVIEW") && (
-          <ReviewStatus user={user} />
+          <ReviewStatus user={user} onLogout={onLogout} />
         )}
       </div>
     </div>
@@ -928,8 +930,9 @@ function ProfileStep({ user, onSave, toast }) {
       }
 
       const updated = normalizeUser(profileResult.user);
+      await db.patch(K.U, user.id, { fs: "PROFILE_COMPLETED" });
       toast("Profile saved!","success");
-      onSave(updated);
+      onSave({ ...updated, fs: "PROFILE_COMPLETED" });
     } catch (err) {
       toast(err.message || "Failed to save profile","error");
     }
@@ -964,8 +967,9 @@ function TrackStep({ user, onSave, toast }) {
     try {
       const trackResult = await ApiUsers.setTrack(sel);
       const updated = normalizeUser(trackResult.user);
+      await db.patch(K.U, user.id, { fs: "ASSESSMENT_PENDING", track: sel });
       toast("Track selected!","success");
-      onSave(updated);
+      onSave({ ...updated, fs: "ASSESSMENT_PENDING", track: sel });
     } catch (err) {
       toast(err.message || "Failed to set track","error");
     }
@@ -994,13 +998,12 @@ function TrackStep({ user, onSave, toast }) {
 }
 
 function PaymentStep({ user, onUnlock, toast }) {
+  const fee = user.track ? (ASSESSMENT_FEE_BY_TRACK[user.track] ?? DEFAULT_ASSESSMENT_FEE) : DEFAULT_ASSESSMENT_FEE;
   const [phone, setPhone] = useState("254712345678");
-  const [amount, setAmount] = useState("1500");
   const [method, setMethod] = useState("mpesa");
   const [phase, setPhase] = useState("idle");
   const pay = async () => {
-    const cfg=(await db.get(K.CF))||SEED.cfg; const amt=Number(amount);
-    if (amt<cfg.assessment_fee_min||amt>cfg.assessment_fee_max) return toast(`Amount must be KES ${cfg.assessment_fee_min}–${cfg.assessment_fee_max}`,"error");
+    const amt = fee;
     if (method==="mpesa"&&!phone) return toast("Phone number required","error");
     setPhase("stk"); await new Promise(r=>setTimeout(r,2000));
     setPhase("confirming"); await new Promise(r=>setTimeout(r,1500));
@@ -1024,14 +1027,13 @@ function PaymentStep({ user, onUnlock, toast }) {
         {phase==="idle"?(
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
             <div style={{background:"var(--gl)",border:"1px solid rgba(0,212,160,.2)",borderRadius:10,padding:"14px 18px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div><div style={{fontSize:13,fontWeight:600,color:"var(--gd)"}}>Assessment Fee</div><div style={{fontSize:12,color:"var(--gd)",opacity:.7}}>One-time · Includes expert review</div></div>
-              <div style={{fontFamily:"var(--fh)",fontWeight:800,fontSize:22,color:"var(--gd)"}}>KES 1,000–2,000</div>
+              <div><div style={{fontSize:13,fontWeight:600,color:"var(--gd)"}}>Assessment Fee</div><div style={{fontSize:12,color:"var(--gd)",opacity:.7}}>{user.track && TRACKS[user.track] ? `${TRACKS[user.track].label} · ` : ""}One-time · Includes expert review</div></div>
+              <div style={{fontFamily:"var(--fh)",fontWeight:800,fontSize:22,color:"var(--gd)"}}>KES {fee.toLocaleString()}</div>
             </div>
             <Sel label="Payment Method" value={method} onChange={setMethod} options={[{value:"mpesa",label:"M-Pesa (STK Push)"},{value:"stripe",label:"Stripe (Card)"}]}/>
             {method==="mpesa"&&<Inp label="M-Pesa Phone" value={phone} onChange={setPhone} placeholder="254712345678"/>}
-            <Inp label="Amount (KES)" type="number" value={amount} onChange={setAmount} placeholder="1500" hint="Between KES 1,000 and 2,000"/>
             <div style={{background:"#FFFBEB",borderRadius:8,padding:"10px 14px",fontSize:13,color:"#92400E"}}>📱 {method==="mpesa"?"You'll receive a push notification on your phone.":"Your card will be charged securely."}</div>
-            <Btn onClick={pay} style={{width:"100%",justifyContent:"center"}}>Pay & Unlock Assessment →</Btn>
+            <Btn onClick={pay} style={{width:"100%",justifyContent:"center"}}>Pay KES {fee.toLocaleString()} & Unlock Assessment →</Btn>
           </div>
         ):(
           <div style={{textAlign:"center",padding:"24px 0"}}>
@@ -1045,7 +1047,7 @@ function PaymentStep({ user, onUnlock, toast }) {
   );
 }
 
-function ReviewStatus({ user }) {
+function ReviewStatus({ user, onLogout }) {
   const deadline=user.review_deadline?new Date(user.review_deadline):new Date(Date.now()+15*86400000);
   const daysLeft=Math.max(0,Math.ceil((deadline-Date.now())/86400000));
   return (
@@ -1061,7 +1063,7 @@ function ReviewStatus({ user }) {
           </div>
         ))}
       </Card>
-      <Btn variant="ghost" onClick={()=>{localStorage.removeItem("ag3_access_token");window.location.hash="/";window.location.reload();}} style={{marginTop:20}}>Log out</Btn>
+      {onLogout && <Btn variant="ghost" onClick={onLogout} style={{marginTop:20}}>Log out</Btn>}
     </div>
   );
 }
@@ -1291,7 +1293,7 @@ function useDashCounts() {
 
 
 // ─── ADMIN APP ────────────────────────────────────────────────
-function AdminApp({ user, view, onNav, toast, notifs, unread, markRead, markAllRead }) {
+function AdminApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead }) {
   const counts=useDashCounts();
   const titles={dashboard:"Dashboard",registrations:"New Registrations",reviews:"FR Reviews",users:"All Users",jobs:"Job Management",payments:"Payments & Escrow",messages:"Messages",tickets:"Support Tickets",emails:"Email Log",reports:"Analytics",audit:"Audit Log",settings:"Platform Settings"};
   const views={
@@ -1310,7 +1312,7 @@ function AdminApp({ user, view, onNav, toast, notifs, unread, markRead, markAllR
   };
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
-      <Sidebar role="admin" active={view} onNav={onNav} user={user} onLogout={()=>{localStorage.removeItem("ag3_access_token");window.location.hash="/";window.location.reload();}} unread={unread} counts={counts}/>
+      <Sidebar role="admin" active={view} onNav={onNav} user={user} onLogout={onLogout} unread={unread} counts={counts}/>
       <div style={{marginLeft:244,flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
         <Topbar user={user} unread={unread} notifs={notifs} onMarkRead={markRead} onMarkAll={markAllRead} title={titles[view]||"Dashboard"}/>
         <div key={view} style={{flex:1,padding:"26px 28px",overflowY:"auto"}} className="au">{views[view]||views.dashboard}</div>
@@ -1487,10 +1489,12 @@ function PaymentsAdmin({ toast }) {
   const deposit=async()=>{
     if(!dForm.job_id||!dForm.amount) return toast("Job and amount required","error");
     setLoading("dep");await new Promise(r=>setTimeout(r,1200));
-    const ref=`ESC-${Date.now()}`;const esc={id:uid(),job_id:Number(dForm.job_id),amount:Number(dForm.amount),status:"holding",reference:ref,created_at:now()};
-    await db.push(K.E,esc);await db.patch(K.J,Number(dForm.job_id),{payment_status:"escrow",escrow_amount:Number(dForm.amount)});
-    const ws=(await db.get(K.W))||[];const wi=ws.findIndex(w=>w.user_id===1);if(wi!==-1){ws[wi].balance-=Number(dForm.amount);await db.set(K.W,ws);await db.push(K.TX,{id:uid(),wallet_id:ws[wi].id,type:"escrow_hold",entry_type:"debit",amount:Number(dForm.amount),currency:"KES",status:"completed",reference:ref,created_at:now()});}
-    await auditLog(1,"escrow.hold",`Deposited KES ${dForm.amount} to escrow for job #${dForm.job_id}`);toast("Escrow deposit successful!","success");setLoading("");setShowDep(false);load();
+    const jobId=dForm.job_id;
+    const ref=`ESC-${Date.now()}`;const esc={id:uid(),job_id:jobId,amount:Number(dForm.amount),status:"holding",reference:ref,created_at:now()};
+    await db.push(K.E,esc);await db.patch(K.J,jobId,{payment_status:"escrow",escrow_amount:Number(dForm.amount)});
+    const adminId=await getAdminId();
+    const ws=(await db.get(K.W))||[];const wi=ws.findIndex(w=>w.user_id===adminId);if(wi!==-1){ws[wi].balance-=Number(dForm.amount);await db.set(K.W,ws);await db.push(K.TX,{id:uid(),wallet_id:ws[wi].id,type:"escrow_hold",entry_type:"debit",amount:Number(dForm.amount),currency:"KES",status:"completed",reference:ref,created_at:now()});}
+    await auditLog(1,"escrow.hold",`Deposited KES ${dForm.amount} to escrow for job #${jobId}`);toast("Escrow deposit successful!","success");setLoading("");setShowDep(false);load();
   };
   const release=async esc=>{
     setLoading("rel-"+esc.id);const cfg=(await db.get(K.CF))||SEED.cfg;const commission=esc.amount*(cfg.commission/100);const payout=esc.amount-commission;
@@ -1540,7 +1544,7 @@ function MessagesView({ user, toast }) {
     const toUser=users.find(u=>u.email===newMsg.to||String(u.id)===newMsg.to);
     if(!toUser) return toast("User not found","error");
     const cs=(await db.get(K.C))||[];let c=cs.find(x=>x.participants.includes(user.id)&&x.participants.includes(toUser.id));
-    if(!c){c={id:uid(),participants:[user.id,toUser.id],last_msg:newMsg.body,last_at:now(),unread:1,created_at:now()};cs.push(c);await db.set(K.C,cs);}
+    if(!c){c=await db.push(K.C,{participants:[user.id,toUser.id],last_msg:newMsg.body,last_at:now(),unread:1,created_at:now()});}
     await db.push(K.M,{id:uid(),convo_id:c.id,sender_id:user.id,recipient_id:toUser.id,body:newMsg.body,created_at:now(),read:false});
     await createNotif(toUser.id,"message.new",`Message from ${user.name}`,newMsg.body.slice(0,100));
     toast("Message sent!","success");setShowNew(false);setNewMsg({to:"",body:""});setSelConvo(c.id);load();
@@ -1692,7 +1696,7 @@ function PlatformSettings({ toast }) {
 }
 
 // ─── FREELANCER APP ───────────────────────────────────────────
-function FreelancerApp({ user, view, onNav, toast, notifs, unread, markRead, markAllRead }) {
+function FreelancerApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead }) {
   const titles={dashboard:"Dashboard",jobs:"Find Jobs",applications:"My Proposals",projects:"Active Projects",messages:"Messages",earnings:"Earnings & Wallet",profile:"Profile & KYC",tickets:"Support"};
   const views={
     dashboard:<FrDashboard user={user} onNav={onNav}/>,
@@ -1706,7 +1710,7 @@ function FreelancerApp({ user, view, onNav, toast, notifs, unread, markRead, mar
   };
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
-      <Sidebar role="freelancer" active={view} onNav={onNav} user={user} onLogout={()=>{localStorage.removeItem("ag3_access_token");window.location.hash="/";window.location.reload();}} unread={unread}/>
+      <Sidebar role="freelancer" active={view} onNav={onNav} user={user} onLogout={onLogout} unread={unread}/>
       <div style={{marginLeft:244,flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
         <Topbar user={user} unread={unread} notifs={notifs} onMarkRead={markRead} onMarkAll={markAllRead} title={titles[view]||"Dashboard"}/>
         <div key={view} style={{flex:1,padding:"26px 28px",overflowY:"auto"}} className="au">{views[view]||views.dashboard}</div>
@@ -1894,7 +1898,7 @@ function FrEarnings({ user }) {
 function FrProfile({ user, toast }) {
   const [form, setForm] = useState({skills:user.skills||"",experience:user.experience||"",country:user.country||"",bio:user.bio||"",portfolio_links:user.portfolio_links||"",availability:user.availability||"Full-time"});
   const [saving, setSaving] = useState(false);
-  const save=async()=>{setSaving(true);await db.patch(K.U,user.id,form);await auditLog(user.id,"profile.update","Profile updated");toast("Profile updated!","success");setSaving(false);};
+  const save=async()=>{setSaving(true);await db.patch(K.U,user.id,form);try{await ApiUsers.updateProfile(form);}catch{}await auditLog(user.id,"profile.update","Profile updated");toast("Profile updated!","success");setSaving(false);};
   return (
     <div>
       <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Profile & KYC</h1></div>
@@ -1933,13 +1937,13 @@ function FrProfile({ user, toast }) {
 }
 
 // ─── SUPPORT APP ──────────────────────────────────────────────
-function SupportApp({ user, view, onNav, toast, notifs, unread, markRead, markAllRead }) {
+function SupportApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead }) {
   const counts=useDashCounts();
   const titles={dashboard:"Support Dashboard",tickets:"Tickets",messages:"Messages",users:"Users",reviews:"FR Reviews"};
   const views={dashboard:<SupportDashboard/>,tickets:<TicketsView user={user} toast={toast}/>,messages:<MessagesView user={user} toast={toast}/>,users:<AllUsers toast={toast}/>,reviews:<FRReviews toast={toast}/>};
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
-      <Sidebar role="support" active={view} onNav={onNav} user={user} onLogout={()=>{localStorage.removeItem("ag3_access_token");window.location.hash="/";window.location.reload();}} unread={unread} counts={counts}/>
+      <Sidebar role="support" active={view} onNav={onNav} user={user} onLogout={onLogout} unread={unread} counts={counts}/>
       <div style={{marginLeft:244,flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
         <Topbar user={user} unread={unread} notifs={notifs} onMarkRead={markRead} onMarkAll={markAllRead} title={titles[view]||"Dashboard"}/>
         <div key={view} style={{flex:1,padding:"26px 28px",overflowY:"auto"}} className="au">{views[view]||views.dashboard}</div>
@@ -1974,22 +1978,32 @@ export default function AfriGigApp() {
   const [showAssessment, setShowAssessment] = useState(false);
   const { notifs, unread, markRead, markAllRead } = useNotifs(user?.id);
 
+  const mergeProfileIntoUser = useCallback(async (authUser) => {
+    let u = normalizeUser(authUser);
+    try {
+      const { data: profile } = await supabase.from("profiles").select("*").eq("id", authUser.id).maybeSingle();
+      if (profile) {
+        u = { ...u, fs: profile.freelancer_status ?? u.fs, track: profile.track ?? u.track, assessment_pct: profile.assessment_pct ?? u.assessment_pct, assessment_unlocked: profile.assessment_unlocked ?? u.assessment_unlocked, queue_pos: profile.queue_position ?? u.queue_pos, review_deadline: profile.review_deadline ?? u.review_deadline, skills: Array.isArray(profile.skills) ? profile.skills.join(", ") : (profile.skills || u.skills), portfolio_links: Array.isArray(profile.portfolio_links) ? profile.portfolio_links.join(", ") : (profile.portfolio_links || u.portfolio_links), experience: profile.experience ?? u.experience, availability: profile.availability ?? u.availability, bio: profile.bio ?? u.bio, country: profile.country ?? u.country };
+      }
+    } catch (_) {}
+    return u;
+  }, []);
+
   useEffect(()=>{
     let sub;
     (async()=>{
       await seedIfEmpty();
-      // Restore session from Supabase
       const { data: { session } } = await supabase.auth.getSession();
       if (session?.user) {
-        const u = normalizeUser(session.user);
+        const u = await mergeProfileIntoUser(session.user);
         setUser(u);
       }
       setLoading(false);
 
-      // Listen for auth changes (login/logout/token refresh)
-      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
         if (session?.user) {
-          setUser(normalizeUser(session.user));
+          const u = await mergeProfileIntoUser(session.user);
+          setUser(u);
         } else {
           setUser(null);
         }
@@ -1997,7 +2011,7 @@ export default function AfriGigApp() {
       sub = subscription;
     })();
     return () => sub?.unsubscribe();
-  },[]);
+  },[mergeProfileIntoUser]);
 
   useEffect(()=>{
     const parts=route.split("/").filter(Boolean);
@@ -2018,6 +2032,13 @@ export default function AfriGigApp() {
     navigate(`/${user.role}/${key}`);
   },[user,navigate]);
 
+  const handleLogout=useCallback(async()=>{
+    await ApiAuth.logout();
+    setUser(null);
+    navigate("/");
+    window.location.reload();
+  },[navigate]);
+
   if(loading) return (
     <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--ink)"}}>
       <div style={{textAlign:"center"}}>
@@ -2034,18 +2055,18 @@ export default function AfriGigApp() {
     else if(route==="/login") content=<AuthPage mode="login" navigate={navigate} onLogin={handleLogin} toast={toast}/>;
     else content=<Landing navigate={navigate}/>;
   } else if(user.role==="admin"){
-    content=<AdminApp user={user} view={view} onNav={handleNav} toast={toast} notifs={notifs} unread={unread} markRead={markRead} markAllRead={markAllRead}/>;
+    content=<AdminApp user={user} view={view} onNav={handleNav} onLogout={handleLogout} toast={toast} notifs={notifs} unread={unread} markRead={markRead} markAllRead={markAllRead}/>;
   } else if(user.role==="support"){
-    content=<SupportApp user={user} view={view} onNav={handleNav} toast={toast} notifs={notifs} unread={unread} markRead={markRead} markAllRead={markAllRead}/>;
+    content=<SupportApp user={user} view={view} onNav={handleNav} onLogout={handleLogout} toast={toast} notifs={notifs} unread={unread} markRead={markRead} markAllRead={markAllRead}/>;
   } else if(user.role==="freelancer"){
     if(["REJECTED","SUSPENDED"].includes(user.fs)){
       content=<StatusPage user={user}/>;
     } else if(user.fs==="APPROVED"){
-      content=<FreelancerApp user={user} view={view} onNav={handleNav} toast={toast} notifs={notifs} unread={unread} markRead={markRead} markAllRead={markAllRead}/>;
+      content=<FreelancerApp user={user} view={view} onNav={handleNav} onLogout={handleLogout} toast={toast} notifs={notifs} unread={unread} markRead={markRead} markAllRead={markAllRead}/>;
     } else if(showAssessment||user.assessment_unlocked&&user.fs==="ASSESSMENT_PENDING"){
       content=<AssessmentFlow user={user} onComplete={u=>{setUser(u);setShowAssessment(false);}} toast={toast}/>;
     } else {
-      content=<Onboarding user={user} onUpdateUser={u=>{setUser(u);if(u.assessment_unlocked&&u.fs==="ASSESSMENT_PENDING")setShowAssessment(true);}} toast={toast}/>;
+      content=<Onboarding user={user} onUpdateUser={u=>{setUser(u);if(u.assessment_unlocked&&u.fs==="ASSESSMENT_PENDING")setShowAssessment(true);}} onLogout={handleLogout} toast={toast}/>;
     }
   } else {
     content=<Landing navigate={navigate}/>;
