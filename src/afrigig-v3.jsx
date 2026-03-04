@@ -904,32 +904,44 @@ function ProfileStep({ user, onSave, toast }) {
   const [cvFile, setCvFile] = useState(null);
   const [loading, setLoading] = useState(false);
 
-  const save = async () => {
+  const save = () => {
     if (!form.skills || !form.experience || !form.country) {
       return toast("Skills, experience and country are required","error");
     }
     setLoading(true);
-    let updatedUser = { ...user };
+    // Build local user object immediately
+    const updatedUser = {
+      ...user,
+      skills:          form.skills,
+      experience:      form.experience,
+      availability:    form.availability,
+      bio:             form.bio,
+      portfolio_links: form.portfolio_links,
+      country:         form.country,
+      fs:              "PROFILE_COMPLETED",
+    };
+
+    // Fire-and-forget Supabase updates so UI never blocks on network
     try {
       const skillsArr = form.skills.split(",").map(s => s.trim()).filter(Boolean);
-      const profileResult = await ApiUsers.updateProfile({
+      ApiUsers.updateProfile({
         skills:          skillsArr,
         experience:      form.experience,
         availability:    form.availability,
         bio:             form.bio,
         portfolio_links: form.portfolio_links ? [form.portfolio_links] : [],
         country:         form.country,
+      }).catch(err => {
+        toast(err?.message || "Profile saved locally. We'll sync to the server later.","warn");
       });
-      updatedUser = normalizeUser(profileResult.user);
+      db.patch(K.U, user.id, { fs: "PROFILE_COMPLETED" }).catch(() => {});
     } catch (_) {
-      // Supabase update failed — still advance the user locally
+      // ignore – UI already advanced
     }
-    // Always mark profile complete in the DB (best-effort) and advance
-    try { await db.patch(K.U, user.id, { fs: "PROFILE_COMPLETED" }); } catch (_) {}
+
     toast("Profile saved! Choose your track next.","success");
-    // setLoading(false) BEFORE onSave so the button doesn't freeze when ProfileStep unmounts
     setLoading(false);
-    onSave({ ...updatedUser, fs: "PROFILE_COMPLETED" });
+    onSave(updatedUser);
   };
   return (
     <div style={{width:"100%",maxWidth:620}} className="au">
