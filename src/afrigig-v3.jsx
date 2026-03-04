@@ -1155,6 +1155,15 @@ function AssessmentFlow({ user, onComplete, toast, onLogout }) {
           users[i]={...users[i],assessment_score:score,assessment_max:total,assessment_pct:pct,assessment_submitted_at:now(),fs:"UNDER_REVIEW",queue_pos:inReview+1,review_deadline:reviewDl,updated_at:now()};
           await db.set(K.U,users);
         }
+        // Persist status into auth metadata so future logins don't send the freelancer back to onboarding/assessment
+        try {
+          await ApiUsers.updateProfile({
+            freelancer_status: "UNDER_REVIEW",
+            assessment_pct: pct,
+            queue_position: inReview + 1,
+            review_deadline: reviewDl,
+          });
+        } catch (_) {}
         await createNotif(1,"assessment.submitted","New assessment submitted",`${user.name} scored ${pct}% — Track: ${track.label} — Queue #${inReview+1}`);
         await createNotif(user.id,"review.started","Under review!",`Assessment complete (${pct}%). Our team will review by ${new Date(reviewDl).toLocaleDateString()}.`);
         await sendEmail(user.id,"Assessment Submitted",`Your assessment scored ${pct}%. Review deadline: ${new Date(reviewDl).toLocaleDateString()}.`);
