@@ -1114,7 +1114,7 @@ function StatusPage({ user }) {
 
 
 // ─── ASSESSMENT FLOW ──────────────────────────────────────────
-function AssessmentFlow({ user, onComplete, toast }) {
+function AssessmentFlow({ user, onComplete, toast, onLogout }) {
   const track=TRACKS[user.track]||TRACKS.software;
   const [phase, setPhase] = useState("intro");
   const [coreAns, setCoreAns] = useState({});
@@ -1176,16 +1176,23 @@ function AssessmentFlow({ user, onComplete, toast }) {
   };
 
   if (phase==="done") return (
-    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
-      <div style={{textAlign:"center",maxWidth:520}} className="bi">
-        <div style={{fontSize:72,marginBottom:20}}>🎉</div>
-        <h2 style={{fontFamily:"var(--fh)",fontSize:30,fontWeight:800,marginBottom:8}}>Assessment Submitted!</h2>
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:24,background:"radial-gradient(circle at top,#E6FAF5,#F8FAFC)"}}>
+      <div style={{textAlign:"center",maxWidth:560}} className="bi">
+        <div style={{display:"inline-flex",flexDirection:"column",alignItems:"center",gap:8,marginBottom:20}}>
+          <div style={{width:88,height:88,borderRadius:"50%",background:"linear-gradient(135deg,var(--g),var(--gd))",display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 18px 45px rgba(0,212,160,.45)"}}>
+            <span style={{fontSize:40,color:"#fff"}}>🎉</span>
+          </div>
+          <span style={{fontSize:12,letterSpacing:".16em",textTransform:"uppercase",color:"var(--sub)",fontWeight:700}}>Assessment submitted</span>
+        </div>
+        <h2 style={{fontFamily:"var(--fh)",fontSize:30,fontWeight:800,marginBottom:8}}>
+          Great work, {(user.name || "freelancer").split(" ")[0]}.
+        </h2>
         <p style={{color:"var(--sub)",marginTop:4,fontSize:15,lineHeight:1.7}}>
           Thank you for completing the AfriGig assessment. Our review team will now evaluate your results.
         </p>
-        <Card style={{marginTop:24,padding:22,textAlign:"left"}}>
+        <Card style={{marginTop:26,padding:22,textAlign:"left",borderRadius:18,boxShadow:"0 14px 40px rgba(15,23,42,.08)"}}>
           <h3 style={{fontFamily:"var(--fh)",fontSize:18,fontWeight:800,marginBottom:10}}>What happens next?</h3>
-          <ul style={{fontSize:14,color:"var(--sub)",lineHeight:1.7,marginLeft:18}}>
+          <ul style={{fontSize:14,color:"var(--sub)",lineHeight:1.8,marginLeft:20}}>
             <li>You’ll receive a detailed decision email once review is complete.</li>
             <li>If you pass the bar, you’ll be issued a unique AfriGig badge number.</li>
             <li>Your digital certificate will confirm you’ve met the AfriGig competence standard.</li>
@@ -1195,7 +1202,11 @@ function AssessmentFlow({ user, onComplete, toast }) {
         <p style={{color:"var(--sub)",fontSize:13,marginTop:18}}>
           You may now safely close this window or log out. We’ll notify you as soon as a decision is ready.
         </p>
-        {/** We reuse the global logout button from the shell layout, so no extra button here */}
+        {onLogout && (
+          <div style={{marginTop:20,display:"flex",justifyContent:"center"}}>
+            <Btn variant="ghost" onClick={onLogout} style={{minWidth:160,justifyContent:"center"}}>Log out</Btn>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2130,7 +2141,7 @@ export default function AfriGigApp() {
     } else if(user.fs==="APPROVED"){
       content=<FreelancerApp user={user} view={view} onNav={handleNav} onLogout={handleLogout} toast={toast} notifs={notifs} unread={unread} markRead={markRead} markAllRead={markAllRead}/>;
     } else if(showAssessment||user.assessment_unlocked&&user.fs==="ASSESSMENT_PENDING"){
-      content=<AssessmentFlow user={user} onComplete={u=>{setUser(u);setShowAssessment(false);}} toast={toast}/>;
+      content=<AssessmentFlow user={user} onComplete={u=>{setUser(u);setShowAssessment(false);}} toast={toast} onLogout={handleLogout}/>;
     } else {
       content=<Onboarding user={user} onUpdateUser={u=>{setUser(u);if(u.assessment_unlocked&&u.fs==="ASSESSMENT_PENDING")setShowAssessment(true);}} onLogout={handleLogout} toast={toast}/>;
     }
