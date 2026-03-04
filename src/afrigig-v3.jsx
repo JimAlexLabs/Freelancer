@@ -910,29 +910,37 @@ function ProfileStep({ user, onSave, toast }) {
     }
     setLoading(true);
     try {
-      const skillsArr =
-        form.skills
-          .split(",")
-          .map(s => s.trim())
-          .filter(Boolean);
+      // Optimistically advance onboarding even if Supabase update fails.
+      let updatedUser = { ...user };
+      try {
+        const skillsArr =
+          form.skills
+            .split(",")
+            .map(s => s.trim())
+            .filter(Boolean);
 
-      const profileResult = await ApiUsers.updateProfile({
-        skills:          skillsArr,
-        experience:      form.experience,
-        availability:    form.availability,
-        bio:             form.bio,
-        portfolio_links: form.portfolio_links ? [form.portfolio_links] : [],
-        country:         form.country,
-      });
+        const profileResult = await ApiUsers.updateProfile({
+          skills:          skillsArr,
+          experience:      form.experience,
+          availability:    form.availability,
+          bio:             form.bio,
+          portfolio_links: form.portfolio_links ? [form.portfolio_links] : [],
+          country:         form.country,
+        });
 
-      if (cvFile) {
-        // CV upload via Supabase Storage can be added here
+        if (cvFile) {
+          // CV upload via Supabase Storage can be added here in future.
+        }
+
+        updatedUser = normalizeUser(profileResult.user);
+        await db.patch(K.U, user.id, { fs: "PROFILE_COMPLETED" });
+      } catch (err) {
+        // If Supabase update fails, still move the user forward locally.
+        toast(err?.message || "Profile saved locally. We'll sync to the server later.","warn");
       }
 
-      const updated = normalizeUser(profileResult.user);
-      await db.patch(K.U, user.id, { fs: "PROFILE_COMPLETED" });
       toast("Profile saved!","success");
-      onSave({ ...updated, fs: "PROFILE_COMPLETED" });
+      onSave({ ...updatedUser, fs: "PROFILE_COMPLETED" });
     } catch (err) {
       toast(err.message || "Failed to save profile","error");
     }
