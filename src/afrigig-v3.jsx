@@ -1049,6 +1049,7 @@ function PaymentStep({ user, onUnlock, toast }) {
     },2000);
   };
   if (phase==="done") return (<div style={{textAlign:"center",maxWidth:400}}><div style={{fontSize:64,marginBottom:16}} className="bi">✅</div><h3 style={{fontFamily:"var(--fh)",fontSize:22}}>Payment Confirmed!</h3><p style={{color:"var(--sub)",marginTop:8}}>Launching assessment…</p></div>);
+  // Enhanced success UI with professional messaging is handled in the done state above.
   return (
     <div style={{width:"100%",maxWidth:460}} className="au">
       <h2 style={{fontFamily:"var(--fh)",fontSize:30,fontWeight:800,marginBottom:8}}>Unlock Assessment</h2>
@@ -1174,7 +1175,30 @@ function AssessmentFlow({ user, onComplete, toast }) {
     setRunning(false);
   };
 
-  if (phase==="done") return (<div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center"}}><div style={{textAlign:"center"}} className="bi"><div style={{fontSize:72,marginBottom:20}}>🎉</div><h2 style={{fontFamily:"var(--fh)",fontSize:30,fontWeight:800}}>Assessment Submitted!</h2><p style={{color:"var(--sub)",marginTop:12,fontSize:16}}>You'll receive a notification when reviewed.</p></div></div>);
+  if (phase==="done") return (
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <div style={{textAlign:"center",maxWidth:520}} className="bi">
+        <div style={{fontSize:72,marginBottom:20}}>🎉</div>
+        <h2 style={{fontFamily:"var(--fh)",fontSize:30,fontWeight:800,marginBottom:8}}>Assessment Submitted!</h2>
+        <p style={{color:"var(--sub)",marginTop:4,fontSize:15,lineHeight:1.7}}>
+          Thank you for completing the AfriGig assessment. Our review team will now evaluate your results.
+        </p>
+        <Card style={{marginTop:24,padding:22,textAlign:"left"}}>
+          <h3 style={{fontFamily:"var(--fh)",fontSize:18,fontWeight:800,marginBottom:10}}>What happens next?</h3>
+          <ul style={{fontSize:14,color:"var(--sub)",lineHeight:1.7,marginLeft:18}}>
+            <li>You’ll receive a detailed decision email once review is complete.</li>
+            <li>If you pass the bar, you’ll be issued a unique AfriGig badge number.</li>
+            <li>Your digital certificate will confirm you’ve met the AfriGig competence standard.</li>
+            <li>You can use this badge and certificate to be recognised on partnered freelancing sites.</li>
+          </ul>
+        </Card>
+        <p style={{color:"var(--sub)",fontSize:13,marginTop:18}}>
+          You may now safely close this window or log out. We’ll notify you as soon as a decision is ready.
+        </p>
+        {/** We reuse the global logout button from the shell layout, so no extra button here */}
+      </div>
+    </div>
+  );
 
   if (phase==="intro") return (
     <div style={{minHeight:"100vh",background:"var(--surf)",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
