@@ -909,42 +909,27 @@ function ProfileStep({ user, onSave, toast }) {
       return toast("Skills, experience and country are required","error");
     }
     setLoading(true);
+    let updatedUser = { ...user };
     try {
-      // Optimistically advance onboarding even if Supabase update fails.
-      let updatedUser = { ...user };
-      try {
-        const skillsArr =
-          form.skills
-            .split(",")
-            .map(s => s.trim())
-            .filter(Boolean);
-
-        const profileResult = await ApiUsers.updateProfile({
-          skills:          skillsArr,
-          experience:      form.experience,
-          availability:    form.availability,
-          bio:             form.bio,
-          portfolio_links: form.portfolio_links ? [form.portfolio_links] : [],
-          country:         form.country,
-        });
-
-        if (cvFile) {
-          // CV upload via Supabase Storage can be added here in future.
-        }
-
-        updatedUser = normalizeUser(profileResult.user);
-        await db.patch(K.U, user.id, { fs: "PROFILE_COMPLETED" });
-      } catch (err) {
-        // If Supabase update fails, still move the user forward locally.
-        toast(err?.message || "Profile saved locally. We'll sync to the server later.","warn");
-      }
-
-      toast("Profile saved!","success");
-      onSave({ ...updatedUser, fs: "PROFILE_COMPLETED" });
-    } catch (err) {
-      toast(err.message || "Failed to save profile","error");
+      const skillsArr = form.skills.split(",").map(s => s.trim()).filter(Boolean);
+      const profileResult = await ApiUsers.updateProfile({
+        skills:          skillsArr,
+        experience:      form.experience,
+        availability:    form.availability,
+        bio:             form.bio,
+        portfolio_links: form.portfolio_links ? [form.portfolio_links] : [],
+        country:         form.country,
+      });
+      updatedUser = normalizeUser(profileResult.user);
+    } catch (_) {
+      // Supabase update failed — still advance the user locally
     }
+    // Always mark profile complete in the DB (best-effort) and advance
+    try { await db.patch(K.U, user.id, { fs: "PROFILE_COMPLETED" }); } catch (_) {}
+    toast("Profile saved! Choose your track next.","success");
+    // setLoading(false) BEFORE onSave so the button doesn't freeze when ProfileStep unmounts
     setLoading(false);
+    onSave({ ...updatedUser, fs: "PROFILE_COMPLETED" });
   };
   return (
     <div style={{width:"100%",maxWidth:620}} className="au">
