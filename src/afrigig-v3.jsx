@@ -1212,8 +1212,18 @@ function AssessmentFlow({ user, onComplete, toast, onLogout }) {
           You may now safely close this window or log out. We’ll notify you as soon as a decision is ready.
         </p>
         {onLogout && (
-          <div style={{marginTop:20,display:"flex",justifyContent:"center"}}>
-            <Btn variant="ghost" onClick={onLogout} style={{minWidth:160,justifyContent:"center"}}>Log out</Btn>
+          <div style={{marginTop:24,display:"flex",justifyContent:"center",position:"relative",zIndex:10}}>
+            <button
+              type="button"
+              onClick={()=>{ try { onLogout(); } catch(e) { window.location.href="/"; } }}
+              style={{
+                minWidth:180,minHeight:44,padding:"12px 24px",fontSize:15,fontWeight:700,fontFamily:"var(--fh)",
+                cursor:"pointer",border:"1.5px solid var(--bdr)",borderRadius:8,background:"#fff",color:"var(--navy)",
+                boxShadow:"0 1px 3px rgba(0,0,0,.08)"
+              }}
+            >
+              Log out
+            </button>
           </div>
         )}
       </div>
@@ -2119,7 +2129,7 @@ export default function AfriGigApp() {
   },[user,navigate]);
 
   const handleLogout=useCallback(async()=>{
-    await ApiAuth.logout();
+    try { await ApiAuth.logout(); } catch (_) { /* ensure UI always logs out even if Supabase fails */ }
     setUser(null);
     navigate("/");
     window.location.reload();
