@@ -1908,6 +1908,12 @@ function FrAssessmentsHub({ user, onStartAssessment, onNav }) {
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
             {pending.map(({ trackId, rec }) => {
               const daysLeft = rec.review_deadline ? Math.max(0, Math.ceil((new Date(rec.review_deadline)-Date.now())/86400000)) : null;
+              const timeline = [
+                { key: "ASSESSMENT_PENDING", label: "Submitted" },
+                { key: "UNDER_REVIEW", label: "In Analysis" },
+                { key: "ASSESSMENT_SUBMITTED", label: "Decision Prep" },
+              ];
+              const idx = Math.max(0, timeline.findIndex(s => s.key === rec.status));
               return (
                 <div key={trackId} style={{padding:"12px 14px",background:"var(--surf)",borderRadius:10}}>
                   <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
@@ -1916,6 +1922,22 @@ function FrAssessmentsHub({ user, onStartAssessment, onNav }) {
                   </div>
                   <div style={{fontSize:13,color:"var(--sub)"}}>
                     {rec.score!==undefined ? `Score: ${rec.score}%` : "Score pending"} · {daysLeft!==null ? `${daysLeft} day(s) remaining` : "Deadline pending"}
+                  </div>
+                  <div style={{marginTop:10}}>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"var(--sub)",marginBottom:6}}>
+                      <span>Assessment timeline</span>
+                      <span>{daysLeft!==null ? `ETA: ${daysLeft} day(s)` : "ETA updating"}</span>
+                    </div>
+                    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8}}>
+                      {timeline.map((s, i) => {
+                        const done = i <= idx;
+                        return (
+                          <div key={s.key} style={{padding:"7px 8px",borderRadius:8,background:done?"rgba(0,212,160,.14)":"#fff",border:`1px solid ${done?"rgba(0,212,160,.35)":"var(--bdr)"}`,textAlign:"center",fontSize:11,fontWeight:700,color:done?"var(--gd)":"var(--sub)"}}>
+                            {s.label}
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
               );
