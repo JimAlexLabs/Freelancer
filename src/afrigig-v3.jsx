@@ -395,7 +395,7 @@ function Sel({ label, value, onChange, options, required }) {
   );
 }
 
-function Card({ children, style:s={}, className="" }) { return <div className={`card ${className}`} style={s}>{children}</div>; }
+function Card({ children, style:s={}, className="", onClick }) { return <div className={`card ${className}`} style={s} onClick={onClick}>{children}</div>; }
 
 function Stat({ label, value, icon, color="var(--g)", sub, loading }) {
   return (
@@ -489,7 +489,11 @@ const NAV_ITEMS = {
 };
 
 function Sidebar({ role, active, onNav, user, onLogout, unread, counts, mobileOpen }) {
-  const items = NAV_ITEMS[role] || [];
+  let items = NAV_ITEMS[role] || [];
+  if (role === "freelancer" && user?.fs !== "APPROVED") {
+    const safe = new Set(["dashboard","assessments","messages","tickets","profile"]);
+    items = items.filter(i => safe.has(i.key));
+  }
   const getBadge = k => {
     if (k==="new") return counts?.new_reg || null;
     if (k==="review") return counts?.under_review || null;
@@ -1034,7 +1038,16 @@ function PaymentStep({ user, onUnlock, toast }) {
             const users=(await db.get(K.U))||[];
             const i=users.findIndex(u=>u.id===user.id);
             if (i!==-1) {
-              users[i]={...users[i],assessment_unlocked:true,updated_at:now()};
+              const amap = users[i].assessment_map || {};
+              const nextMap = {
+                ...amap,
+                [user.track]: {
+                  ...(amap[user.track] || {}),
+                  status: "ASSESSMENT_PENDING",
+                  paid_at: now(),
+                },
+              };
+              users[i]={...users[i],assessment_unlocked:true,assessment_map:nextMap,updated_at:now()};
               await db.set(K.U,users);
             }
             const ws=(await db.get(K.W))||[]; const w=ws.find(x=>x.user_id===user.id);
@@ -1042,6 +1055,19 @@ function PaymentStep({ user, onUnlock, toast }) {
             await createNotif(1,"payment.assessment","Assessment fee received",`${user.name} paid KES ${amt} via ${method.toUpperCase()} (${ref})`);
             await auditLog(user.id,"payment.assessment",`Assessment fee: KES ${amt}`);
             await sendEmail(user.id,"Assessment Unlocked!","Your assessment is now unlocked. You have 2 hours once started. Good luck!");
+            try {
+              await ApiUsers.updateProfile({
+                assessment_unlocked: true,
+                assessment_map: {
+                  ...(user.assessment_map || {}),
+                  [user.track]: {
+                    ...((user.assessment_map || {})[user.track] || {}),
+                    status: "ASSESSMENT_PENDING",
+                    paid_at: now(),
+                  },
+                },
+              });
+            } catch (_) {}
           } catch (err) {
             toast(err?.message || "Payment recorded locally. We'll sync to the server later.","warn");
           }
@@ -1227,7 +1253,7 @@ function AssessmentFlow({ user, onComplete, toast, onLogout, onGoHome }) {
           You may now safely close this window or log out. We’ll notify you as soon as a decision is ready.
         </p>
         <div style={{marginTop:24,display:"flex",justifyContent:"center",gap:10,flexWrap:"wrap",position:"relative",zIndex:10}}>
-          {onGoHome && <Btn onClick={onGoHome}>Go to My Home</Btn>}
+          {onGoHome && <Btn onClick={onGoHome}>Log out to Home</Btn>}
           {onLogout && (
             <button
               type="button"
@@ -1238,7 +1264,7 @@ function AssessmentFlow({ user, onComplete, toast, onLogout, onGoHome }) {
                 boxShadow:"0 1px 3px rgba(0,0,0,.08)"
               }}
             >
-              Log out
+              Sign out completely
             </button>
           )}
         </div>
@@ -1638,7 +1664,18 @@ function PaymentsAdmin({ toast }) {
 
 function MessagesView({ user, toast }) {
   const [convos,setConvos]=useState([]);const [msgs,setMsgs]=useState([]);const [users,setUsers]=useState([]);const [selConvo,setSelConvo]=useState(null);const [reply,setReply]=useState("");const [showNew,setShowNew]=useState(false);const [newMsg,setNewMsg]=useState({to:"",body:""});const endRef=useRef();
-  const load=async()=>{const [c,m,u]=await Promise.all([db.get(K.C),db.get(K.M),db.get(K.U)]);setConvos((c||[]).filter(x=>x.participants.includes(user.id)).sort((a,b)=>new Date(b.last_at)-new Date(a.last_at)));setMsgs(m||[]);setUsers(u||[]);};
+  const load=async()=>{
+    const [c,m,u]=await Promise.all([db.get(K.C),db.get(K.M),db.get(K.U)]);
+    const allUsers = u||[];
+    const supportIds = new Set(allUsers.filter(x=>["admin","support"].includes(x.role)).map(x=>x.id));
+    const mine = (c||[]).filter(x=>x.participants.includes(user.id));
+    const visible = user.role==="freelancer"
+      ? mine.filter(x=>x.participants.some(pid=>pid!==user.id && supportIds.has(pid)))
+      : mine;
+    setConvos(visible.sort((a,b)=>new Date(b.last_at)-new Date(a.last_at)));
+    setMsgs(m||[]);
+    setUsers(allUsers);
+  };
   useEffect(()=>{load();const t=setInterval(load,3000);return()=>clearInterval(t);},[]);
   useEffect(()=>{endRef.current?.scrollIntoView({behavior:"smooth"});},[msgs,selConvo]);
   const getOther=c=>{const oid=c.participants.find(id=>id!==user.id);return users.find(u=>u.id===oid);};
@@ -1652,18 +1689,32 @@ function MessagesView({ user, toast }) {
     setReply("");load();
   };
   const sendNew=async()=>{
-    if(!newMsg.to||!newMsg.body) return toast("Recipient and message required","error");
-    const toUser=users.find(u=>u.email===newMsg.to||String(u.id)===newMsg.to);
-    if(!toUser) return toast("User not found","error");
-    const cs=(await db.get(K.C))||[];let c=cs.find(x=>x.participants.includes(user.id)&&x.participants.includes(toUser.id));
-    if(!c){c=await db.push(K.C,{participants:[user.id,toUser.id],last_msg:newMsg.body,last_at:now(),unread:1,created_at:now()});}
-    await db.push(K.M,{id:uid(),convo_id:c.id,sender_id:user.id,recipient_id:toUser.id,body:newMsg.body,created_at:now(),read:false});
-    await createNotif(toUser.id,"message.new",`Message from ${user.name}`,newMsg.body.slice(0,100));
-    toast("Message sent!","success");setShowNew(false);setNewMsg({to:"",body:""});setSelConvo(c.id);load();
+    if(!newMsg.body) return toast("Message required","error");
+    const recipients = user.role==="freelancer"
+      ? users.filter(u=>["admin","support"].includes(u.role))
+      : (() => {
+          if(!newMsg.to) return [];
+          const toUser=users.find(u=>u.email===newMsg.to||String(u.id)===newMsg.to);
+          return toUser ? [toUser] : [];
+        })();
+    if(recipients.length===0) return toast("Recipient not found","error");
+    const cs=(await db.get(K.C))||[];
+    let firstConvoId = null;
+    for (const toUser of recipients) {
+      let c=cs.find(x=>x.participants.includes(user.id)&&x.participants.includes(toUser.id));
+      if(!c){
+        c=await db.push(K.C,{participants:[user.id,toUser.id],last_msg:newMsg.body,last_at:now(),unread:1,created_at:now()});
+        cs.push(c);
+      }
+      await db.push(K.M,{id:uid(),convo_id:c.id,sender_id:user.id,recipient_id:toUser.id,body:newMsg.body,created_at:now(),read:false});
+      await createNotif(toUser.id,"message.new",`Message from ${user.name}`,newMsg.body.slice(0,100));
+      if (!firstConvoId) firstConvoId = c.id;
+    }
+    toast("Message sent!","success");setShowNew(false);setNewMsg({to:"",body:""});setSelConvo(firstConvoId);load();
   };
   return (
     <div>
-      {showNew&&(<div className="overlay" onClick={()=>setShowNew(false)}><div className="modal" style={{maxWidth:440,padding:32}} onClick={e=>e.stopPropagation()}><h3 style={{fontFamily:"var(--fh)",fontSize:20,fontWeight:700,marginBottom:20}}>New Message</h3><div style={{display:"flex",flexDirection:"column",gap:14}}><Inp label="To (email or user ID)" value={newMsg.to} onChange={v=>setNewMsg({...newMsg,to:v})} required/><Inp label="Message" value={newMsg.body} onChange={v=>setNewMsg({...newMsg,body:v})} rows={4} required/></div><div style={{display:"flex",gap:10,marginTop:20}}><Btn onClick={sendNew}>Send</Btn><Btn variant="ghost" onClick={()=>setShowNew(false)}>Cancel</Btn></div></div></div>)}
+      {showNew&&(<div className="overlay" onClick={()=>setShowNew(false)}><div className="modal" style={{maxWidth:440,padding:32}} onClick={e=>e.stopPropagation()}><h3 style={{fontFamily:"var(--fh)",fontSize:20,fontWeight:700,marginBottom:20}}>New Message</h3><div style={{display:"flex",flexDirection:"column",gap:14}}>{user.role==="freelancer"?<div style={{padding:"12px 14px",background:"var(--surf)",borderRadius:8,fontSize:13,color:"var(--mu)"}}><strong>Recipients:</strong> admin@afrigig.com and support@afrigig.com (both receive a copy)</div>:<Inp label="To (email or user ID)" value={newMsg.to} onChange={v=>setNewMsg({...newMsg,to:v})} required/>}<Inp label="Message" value={newMsg.body} onChange={v=>setNewMsg({...newMsg,body:v})} rows={4} required/></div><div style={{display:"flex",gap:10,marginTop:20}}><Btn onClick={sendNew}>Send</Btn><Btn variant="ghost" onClick={()=>setShowNew(false)}>Cancel</Btn></div></div></div>)}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Messages</h1><Btn onClick={()=>setShowNew(true)} icon="✉">New Message</Btn></div>
       <Card style={{padding:0,overflow:"hidden",display:"grid",gridTemplateColumns:"300px 1fr",height:580}}>
         <div style={{borderRight:"1px solid var(--bdr)",overflowY:"auto"}}>
@@ -1836,7 +1887,7 @@ function FrAssessmentsHub({ user, onStartAssessment, onNav }) {
   const amap = user.assessment_map || {};
   const pending = TRACK_ORDER
     .map(id => ({ trackId: id, rec: amap[id] }))
-    .filter(x => x.rec && ["UNDER_REVIEW","ASSESSMENT_SUBMITTED"].includes(x.rec.status));
+    .filter(x => x.rec && ["ASSESSMENT_PENDING","UNDER_REVIEW","ASSESSMENT_SUBMITTED"].includes(x.rec.status));
   const available = TRACK_ORDER.filter(id => !amap[id]);
   return (
     <div>
@@ -1888,7 +1939,7 @@ function FrAssessmentsHub({ user, onStartAssessment, onNav }) {
                 {done ? (
                   <div style={{fontSize:12,color:"var(--sub)"}}>Already attempted. Retake disabled.</div>
                 ) : (
-                  <Btn size="sm" onClick={()=>onStartAssessment(trackId)}>Start Assessment</Btn>
+                  <Btn size="sm" onClick={()=>onStartAssessment(trackId)}>Pay & Start Assessment</Btn>
                 )}
               </div>
             );
@@ -1905,13 +1956,22 @@ function FrAssessmentsHub({ user, onStartAssessment, onNav }) {
 function FrDashboard({ user, onNav }) {
   const [jobs, setJobs] = useState([]);
   const [wallet, setWallet] = useState(null);
-  const pendingCount = Object.values(user.assessment_map || {}).filter(v => ["UNDER_REVIEW","ASSESSMENT_SUBMITTED"].includes(v?.status)).length;
+  const pendingCount = Object.values(user.assessment_map || {}).filter(v => ["ASSESSMENT_PENDING","UNDER_REVIEW","ASSESSMENT_SUBMITTED"].includes(v?.status)).length;
   useEffect(()=>{ db.get(K.J).then(j=>setJobs((j||[]).filter(x=>x.status==="open").slice(0,4))); db.get(K.W).then(ws=>setWallet((ws||[]).find(w=>w.user_id===user.id))); },[]);
   return (
     <div>
       <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Welcome back, {user.name.split(" ")[0]}! 👋</h1><p style={{color:"var(--sub)",marginTop:4}}>Here's your overview for today.</p></div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24}} className="stagger">
-        <Stat label="Wallet Balance" value={fmtKES(wallet?.balance||0)} icon="💰" color="var(--g)"/>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:16,marginBottom:24}} className="stagger">
+        <Card style={{padding:18,cursor:user.fs==="APPROVED"?"pointer":"not-allowed",opacity:user.fs==="APPROVED"?1:.75}} onClick={user.fs==="APPROVED"?()=>onNav("earnings"):undefined}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <p style={{fontSize:12,color:"var(--sub)",fontWeight:600,marginBottom:8,textTransform:"uppercase",letterSpacing:".05em"}}>Wallet Balance</p>
+              <p style={{fontSize:24,fontWeight:800,fontFamily:"var(--fh)",color:"var(--ink)"}}>{fmtKES(wallet?.balance||0)}</p>
+              <p style={{fontSize:12,color:"var(--sub)",marginTop:6}}>{user.fs==="APPROVED"?"Open wallet analytics & withdrawals":"Unlocks after approval"}</p>
+            </div>
+            <div style={{width:44,height:44,background:"rgba(0,212,160,.12)",borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>💰</div>
+          </div>
+        </Card>
         <Stat label="Open Jobs" value={jobs.length} icon="💼" color="var(--info)"/>
         <Stat label="Track" value={user.track?TRACKS[user.track]?.label.split(" ")[0]:"Not set"} icon={user.track?TRACKS[user.track]?.icon:"🎯"} color="var(--pur)"/>
         <Stat label="Status" value={user.fs||"—"} icon={user.fs==="APPROVED"?"✅":"⏳"} color={user.fs==="APPROVED"?"var(--g)":"var(--warn)"}/>
@@ -2063,7 +2123,40 @@ function FrProjects({ user }) {
 function FrEarnings({ user }) {
   const [wallet, setWallet] = useState(null);
   const [txns, setTxns] = useState([]);
+  const [amount, setAmount] = useState("");
+  const [processing, setProcessing] = useState(false);
   useEffect(()=>{ Promise.all([db.get(K.W),db.get(K.TX)]).then(([ws,tx])=>{const w=(ws||[]).find(x=>x.user_id===user.id);setWallet(w);setTxns(w?(tx||[]).filter(t=>t.wallet_id===w.id).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)):[]);}); },[]);
+  const approved = user.fs==="APPROVED";
+  const lastWithdrawal = txns.find(t => t.type==="withdrawal_request");
+  const nextWindow = lastWithdrawal ? new Date(new Date(lastWithdrawal.created_at).getTime() + 14*86400000) : null;
+  const canWithdraw = approved && (!nextWindow || Date.now() >= nextWindow.getTime());
+  const requestWithdraw = async () => {
+    if (!approved || !wallet) return;
+    const n = Number(amount || 0);
+    if (!n || n <= 0) return;
+    if (n > Number(wallet.balance || 0)) return;
+    if (!canWithdraw) return;
+    setProcessing(true);
+    await db.push(K.TX,{id:uid(),wallet_id:wallet.id,type:"withdrawal_request",entry_type:"debit",amount:n,currency:"KES",status:"pending",reference:`WDR-${Date.now()}`,created_at:now()});
+    await db.patch(K.W, wallet.id, { balance: Number(wallet.balance||0) - n });
+    await createNotif(1,"wallet.withdraw","Withdrawal request",`${user.name} requested ${fmtKES(n)} withdrawal.`);
+    await sendEmail(user.id,"Withdrawal Request Received",`We received your withdrawal request for ${fmtKES(n)}. Payout window is every 2 weeks.`);
+    const ws=(await db.get(K.W))||[]; const w=(ws||[]).find(x=>x.user_id===user.id); setWallet(w||wallet);
+    const tx=(await db.get(K.TX))||[]; setTxns(w?(tx||[]).filter(t=>t.wallet_id===w.id).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)):txns);
+    setAmount("");
+    setProcessing(false);
+  };
+  if (!approved) {
+    return (
+      <div>
+        <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Earnings & Wallet</h1></div>
+        <Card style={{padding:28}}>
+          <div style={{fontSize:18,fontWeight:700,marginBottom:8}}>Wallet unlocks after approval</div>
+          <p style={{color:"var(--sub)",lineHeight:1.7}}>Your account is currently <Bdg status={user.fs}/> . Earnings, withdrawals, and wallet analytics become available once your assessment is approved.</p>
+        </Card>
+      </div>
+    );
+  }
   return (
     <div>
       <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Earnings & Wallet</h1></div>
@@ -2072,6 +2165,18 @@ function FrEarnings({ user }) {
         <Stat label="Total Earned" value={fmtKES(txns.filter(t=>t.entry_type==="credit").reduce((s,t)=>s+t.amount,0))} icon="📈" color="var(--info)"/>
         <Stat label="Transactions" value={txns.length} icon="📊" color="var(--pur)"/>
       </div>
+      <Card style={{padding:22,marginBottom:18}}>
+        <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16,marginBottom:12}}>Withdraw Funds</h3>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,alignItems:"end"}}>
+          <Inp label="Amount (KES)" type="number" value={amount} onChange={setAmount} placeholder="e.g. 10000"/>
+          <div>
+            <Btn onClick={requestWithdraw} loading={processing} disabled={!canWithdraw || !amount}>Request Withdrawal</Btn>
+            <div style={{fontSize:12,color:"var(--sub)",marginTop:8}}>
+              {!canWithdraw && nextWindow ? `Next withdrawal window: ${nextWindow.toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"})}` : "Withdrawals are processed every 2 weeks."}
+            </div>
+          </div>
+        </div>
+      </Card>
       <Card style={{padding:0,overflow:"hidden"}}>
         <div style={{padding:"14px 20px",borderBottom:"1px solid var(--bdr)"}}><h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16}}>Transaction History</h3></div>
         {txns.length===0?<Empty icon="💸" title="No transactions yet" sub="Your earnings will appear here"/>:(<table><thead><tr><th>Type</th><th>Amount</th><th>Reference</th><th>Date</th></tr></thead><tbody>{txns.map(t=>(<tr key={t.id}><td style={{fontWeight:500,textTransform:"capitalize"}}>{t.type.replace(/_/g," ")}</td><td style={{fontFamily:"var(--fh)",fontWeight:700,color:t.entry_type==="credit"?"var(--gd)":"var(--err)"}}>{t.entry_type==="credit"?"+":"-"}{fmtKES(t.amount)}</td><td style={{fontFamily:"var(--fm)",fontSize:12,color:"var(--sub)"}}>{t.reference}</td><td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(t.created_at)}</td></tr>))}</tbody></table>)}
@@ -2160,7 +2265,7 @@ export default function AfriGigApp() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("dashboard");
-  const [showAssessment, setShowAssessment] = useState(false);
+  const [assessmentMode, setAssessmentMode] = useState(null); // null | "payment" | "assessment"
   const { notifs, unread, markRead, markAllRead } = useNotifs(user?.id);
 
   const mergeProfileIntoUser = useCallback(async (authUser) => {
@@ -2204,6 +2309,15 @@ export default function AfriGigApp() {
     else setView("dashboard");
   },[route]);
 
+  useEffect(() => {
+    if (!user || user.role !== "freelancer" || user.fs === "APPROVED") return;
+    const safe = new Set(["dashboard","assessments","messages","tickets","profile"]);
+    if (!safe.has(view)) {
+      setView("dashboard");
+      navigate("/freelancer/dashboard");
+    }
+  }, [user, view, navigate]);
+
   const handleLogin=useCallback((u,token)=>{
     setUser(u);
     if(u.role==="admin") navigate("/admin/dashboard");
@@ -2213,9 +2327,16 @@ export default function AfriGigApp() {
 
   const handleNav=useCallback((key)=>{
     if(!user) return;
+    if (user.role==="freelancer" && user.fs!=="APPROVED") {
+      const safe = new Set(["dashboard","assessments","messages","tickets","profile"]);
+      if (!safe.has(key)) {
+        toast("This section unlocks after assessment approval.","warn");
+        key = "dashboard";
+      }
+    }
     setView(key);
     navigate(`/${user.role}/${key}`);
-  },[user,navigate]);
+  },[user,navigate,toast]);
 
   const handleLogout=useCallback(async()=>{
     try { await ApiAuth.logout(); } catch (_) { /* ensure UI always logs out even if Supabase fails */ }
@@ -2234,20 +2355,20 @@ export default function AfriGigApp() {
     const nextUser = {
       ...user,
       track: trackId,
-      fs: user.fs === "APPROVED" ? "APPROVED" : "ASSESSMENT_PENDING",
-      assessment_unlocked: true,
+      fs: user.fs === "APPROVED" ? "APPROVED" : (user.fs === "UNDER_REVIEW" ? "UNDER_REVIEW" : "ASSESSMENT_PENDING"),
+      assessment_unlocked: false,
       assessment_map: {
         ...amap,
         [trackId]: { status: "ASSESSMENT_PENDING", started_at: now() },
       },
     };
     setUser(nextUser);
-    setShowAssessment(true);
+    setAssessmentMode("payment");
     try {
-      await db.patch(K.U, user.id, { track: trackId, assessment_unlocked: true, assessment_map: nextUser.assessment_map });
+      await db.patch(K.U, user.id, { track: trackId, assessment_unlocked: false, assessment_map: nextUser.assessment_map });
     } catch (_) {}
     try {
-      await ApiUsers.updateProfile({ track: trackId, assessment_unlocked: true, assessment_map: nextUser.assessment_map });
+      await ApiUsers.updateProfile({ track: trackId, assessment_unlocked: false, assessment_map: nextUser.assessment_map });
     } catch (_) {}
   }, [user, toast]);
 
@@ -2273,10 +2394,18 @@ export default function AfriGigApp() {
   } else if(user.role==="freelancer"){
     if(["REJECTED","SUSPENDED"].includes(user.fs)){
       content=<StatusPage user={user}/>;
-    } else if(showAssessment){
-      content=<AssessmentFlow user={user} onComplete={u=>{setUser(u);setShowAssessment(false);}} toast={toast} onLogout={handleLogout} onGoHome={()=>{setShowAssessment(false);setView("dashboard");navigate("/freelancer/dashboard");}}/>;
-    } else if((!user.fs || user.fs==="REGISTERED" || user.fs==="PROFILE_COMPLETED") || (user.fs==="ASSESSMENT_PENDING" && !user.assessment_unlocked)){
-      content=<Onboarding user={user} onUpdateUser={u=>{setUser(u);if(u.start_assessment_now===true)setShowAssessment(true);}} onLogout={handleLogout} toast={toast}/>;
+    } else if(assessmentMode==="payment"){
+      content=<PaymentStep user={user} onUnlock={u=>{setUser(u);setAssessmentMode(u.start_assessment_now ? "assessment" : null);}} toast={toast}/>;
+    } else if(assessmentMode==="assessment"){
+      content=<AssessmentFlow user={user} onComplete={u=>{setUser(u);setAssessmentMode(null);}} toast={toast} onLogout={handleLogout} onGoHome={()=>{setAssessmentMode(null);setView("dashboard");navigate("/freelancer/dashboard");}}/>;
+    } else if(
+      (
+        (!user.fs || user.fs==="REGISTERED" || user.fs==="PROFILE_COMPLETED") &&
+        Object.keys(user.assessment_map || {}).length === 0
+      ) ||
+      (user.fs==="ASSESSMENT_PENDING" && !user.assessment_unlocked && !user.track)
+    ){
+      content=<Onboarding user={user} onUpdateUser={u=>{setUser(u);if(u.start_assessment_now===true)setAssessmentMode("assessment");}} onLogout={handleLogout} toast={toast}/>;
     } else {
       content=<FreelancerApp user={user} view={view} onNav={handleNav} onLogout={handleLogout} toast={toast} notifs={notifs} unread={unread} markRead={markRead} markAllRead={markAllRead} onStartAssessment={startTrackAssessment}/>;
     }
