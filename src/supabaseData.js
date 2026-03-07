@@ -69,6 +69,7 @@ function toAppUser(p) {
     assessment_unlocked: p.assessment_unlocked ?? false,
     queue_pos: p.queue_position ?? null,
     review_deadline: p.review_deadline ?? null,
+    assessment_map: p.assessment_map || {},
     is_online: p.is_online ?? false,
     rejection_reason: p.rejection_reason || null,
     approved_at: p.approved_at || null,
@@ -100,6 +101,7 @@ function toProfileUpdate(u) {
   if (u.rejection_reason !== undefined) out.rejection_reason = u.rejection_reason;
   if (u.queue_pos !== undefined) out.queue_position = u.queue_pos;
   if (u.review_deadline !== undefined) out.review_deadline = u.review_deadline;
+  if (u.assessment_map !== undefined) out.assessment_map = u.assessment_map;
   if (u.approved_at !== undefined) out.approved_at = u.approved_at;
   out.updated_at = new Date().toISOString();
   return out;

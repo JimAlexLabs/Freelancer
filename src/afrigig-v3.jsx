@@ -160,6 +160,7 @@ function normalizeUser(supabaseUser) {
     queue_pos:           m.queue_position ?? null,
     review_deadline:     m.review_deadline ?? null,
     is_online:           m.is_online ?? false,
+    assessment_map:      m.assessment_map || {},
   };
 }
 
@@ -225,6 +226,8 @@ const TRACKS = {
   writing:{ id:"writing", label:"Technical Writing", icon:"✍️", desc:"Documentation, content, technical communication", color:"#EC4899" },
   nontech:{ id:"nontech", label:"Non-Technical / Admin", icon:"🗂️", desc:"Project management, admin, operations", color:"#6366F1" },
 };
+const TRACK_ORDER = Object.keys(TRACKS);
+const TRACK_DONE_STATUSES = new Set(["UNDER_REVIEW", "APPROVED", "REJECTED", "ASSESSMENT_SUBMITTED"]);
 // Static assessment fee (KES) per track – by weight of assessment
 const ASSESSMENT_FEE_BY_TRACK = { software: 1500, uiux: 1200, data: 1500, devops: 1500, writing: 1000, nontech: 1000 };
 const DEFAULT_ASSESSMENT_FEE = 1500;
@@ -474,6 +477,7 @@ const NAV_ITEMS = {
   ],
   freelancer:[
     {key:"dashboard",icon:"⬡",label:"Dashboard"},
+    {key:"assessments",icon:"🧪",label:"Assessments"},
     {key:"jobs",icon:"🔍",label:"Find Jobs"},
     {key:"applications",icon:"📤",label:"My Proposals"},
     {key:"projects",icon:"📁",label:"Active Projects"},
@@ -1044,7 +1048,7 @@ function PaymentStep({ user, onUnlock, toast }) {
         })();
 
         setPhase("done");
-        setTimeout(()=>onUnlock({...user,assessment_unlocked:true,fs:"ASSESSMENT_PENDING"}),800);
+        setTimeout(()=>onUnlock({...user,assessment_unlocked:true,fs:"ASSESSMENT_PENDING",start_assessment_now:true}),800);
       },1500);
     },2000);
   };
@@ -1114,7 +1118,7 @@ function StatusPage({ user }) {
 
 
 // ─── ASSESSMENT FLOW ──────────────────────────────────────────
-function AssessmentFlow({ user, onComplete, toast, onLogout }) {
+function AssessmentFlow({ user, onComplete, toast, onLogout, onGoHome }) {
   const track=TRACKS[user.track]||TRACKS.software;
   const [phase, setPhase] = useState("intro");
   const [coreAns, setCoreAns] = useState({});
@@ -1147,12 +1151,22 @@ function AssessmentFlow({ user, onComplete, toast, onLogout }) {
     const inReview=users.filter(u=>["UNDER_REVIEW","ASSESSMENT_SUBMITTED"].includes(u.fs)).length;
     const reviewDl=new Date(Date.now()+cfg.review_days*86400000).toISOString();
     const i=users.findIndex(u=>u.id===user.id);
+    const nextAssessmentMap = {
+      ...(user.assessment_map || {}),
+      [user.track]: {
+        status: "UNDER_REVIEW",
+        score: pct,
+        submitted_at: now(),
+        review_deadline: reviewDl,
+        queue_pos: inReview + 1,
+      },
+    };
 
     // Best-effort background write of assessment results
     (async()=>{
       try {
         if(i!==-1){
-          users[i]={...users[i],assessment_score:score,assessment_max:total,assessment_pct:pct,assessment_submitted_at:now(),fs:"UNDER_REVIEW",queue_pos:inReview+1,review_deadline:reviewDl,updated_at:now()};
+          users[i]={...users[i],assessment_score:score,assessment_max:total,assessment_pct:pct,assessment_submitted_at:now(),fs:"UNDER_REVIEW",queue_pos:inReview+1,review_deadline:reviewDl,assessment_map:nextAssessmentMap,updated_at:now()};
           await db.set(K.U,users);
         }
         // Persist status into auth metadata so future logins don't send the freelancer back to onboarding/assessment
@@ -1162,6 +1176,7 @@ function AssessmentFlow({ user, onComplete, toast, onLogout }) {
             assessment_pct: pct,
             queue_position: inReview + 1,
             review_deadline: reviewDl,
+            assessment_map: nextAssessmentMap,
           });
         } catch (_) {}
         await createNotif(1,"assessment.submitted","New assessment submitted",`${user.name} scored ${pct}% — Track: ${track.label} — Queue #${inReview+1}`);
@@ -1173,7 +1188,7 @@ function AssessmentFlow({ user, onComplete, toast, onLogout }) {
       }
     })();
 
-    onComplete({...user,fs:"UNDER_REVIEW",assessment_pct:pct,queue_pos:inReview+1});
+    onComplete({...user,fs:"UNDER_REVIEW",assessment_pct:pct,queue_pos:inReview+1,assessment_map:nextAssessmentMap});
   },[coreAns,techAns,runResults,sqlAns,user,track,techQs,hasCoding,hasSql]);
 
   const simulateRun = async (cid) => {
@@ -1211,8 +1226,9 @@ function AssessmentFlow({ user, onComplete, toast, onLogout }) {
         <p style={{color:"var(--sub)",fontSize:13,marginTop:18}}>
           You may now safely close this window or log out. We’ll notify you as soon as a decision is ready.
         </p>
-        {onLogout && (
-          <div style={{marginTop:24,display:"flex",justifyContent:"center",position:"relative",zIndex:10}}>
+        <div style={{marginTop:24,display:"flex",justifyContent:"center",gap:10,flexWrap:"wrap",position:"relative",zIndex:10}}>
+          {onGoHome && <Btn onClick={onGoHome}>Go to My Home</Btn>}
+          {onLogout && (
             <button
               type="button"
               onClick={()=>{ try { onLogout(); } catch(e) { window.location.href="/"; } }}
@@ -1224,8 +1240,8 @@ function AssessmentFlow({ user, onComplete, toast, onLogout }) {
             >
               Log out
             </button>
-          </div>
-        )}
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1425,7 +1441,7 @@ function AdminOverview({ onNav }) {
   return (
     <div>
       <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Admin Dashboard</h1><p style={{color:"var(--sub)",marginTop:4}}>Live platform overview.</p></div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24}} className="stagger">
+      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:16,marginBottom:24}} className="stagger">
         <Stat label="Under Review" value={data?data.frs.filter(u=>u.fs==="UNDER_REVIEW").length:"…"} icon="🔍" color="var(--pur)" loading={!data}/>
         <Stat label="New Registrations" value={data?data.frs.filter(u=>["REGISTERED","PROFILE_COMPLETED"].includes(u.fs)).length:"…"} icon="🆕" color="var(--info)" loading={!data}/>
         <Stat label="Approved Freelancers" value={data?data.frs.filter(u=>u.fs==="APPROVED").length:"…"} icon="✅" color="var(--g)" loading={!data}/>
@@ -1792,10 +1808,11 @@ function PlatformSettings({ toast }) {
 }
 
 // ─── FREELANCER APP ───────────────────────────────────────────
-function FreelancerApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead }) {
-  const titles={dashboard:"Dashboard",jobs:"Find Jobs",applications:"My Proposals",projects:"Active Projects",messages:"Messages",earnings:"Earnings & Wallet",profile:"Profile & KYC",tickets:"Support"};
+function FreelancerApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead, onStartAssessment }) {
+  const titles={dashboard:"Dashboard",assessments:"Assessments",jobs:"Find Jobs",applications:"My Proposals",projects:"Active Projects",messages:"Messages",earnings:"Earnings & Wallet",profile:"Profile & KYC",tickets:"Support"};
   const views={
     dashboard:<FrDashboard user={user} onNav={onNav}/>,
+    assessments:<FrAssessmentsHub user={user} onStartAssessment={onStartAssessment} onNav={onNav}/>,
     jobs:<FrJobs user={user} toast={toast}/>,
     applications:<FrApplications user={user}/>,
     projects:<FrProjects user={user}/>,
@@ -1815,9 +1832,80 @@ function FreelancerApp({ user, view, onNav, onLogout, toast, notifs, unread, mar
   );
 }
 
+function FrAssessmentsHub({ user, onStartAssessment, onNav }) {
+  const amap = user.assessment_map || {};
+  const pending = TRACK_ORDER
+    .map(id => ({ trackId: id, rec: amap[id] }))
+    .filter(x => x.rec && ["UNDER_REVIEW","ASSESSMENT_SUBMITTED"].includes(x.rec.status));
+  const available = TRACK_ORDER.filter(id => !amap[id]);
+  return (
+    <div>
+      <div style={{marginBottom:24}}>
+        <h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Assessments</h1>
+        <p style={{color:"var(--sub)",marginTop:4}}>Track your approvals and unlock additional tracks. Completed assessments cannot be retaken.</p>
+      </div>
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginBottom:24}} className="stagger">
+        <Stat label="Pending Reviews" value={pending.length} icon="⏳" color="var(--warn)"/>
+        <Stat label="Completed Tracks" value={TRACK_ORDER.length - available.length} icon="✅" color="var(--g)"/>
+        <Stat label="Available Tracks" value={available.length} icon="🧪" color="var(--info)"/>
+      </div>
+      <Card style={{padding:22,marginBottom:20}}>
+        <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16,marginBottom:12}}>Pending Approval Progress</h3>
+        {pending.length===0 ? (
+          <Empty icon="📭" title="No pending approvals" sub="Start another track to add it to your review queue."/>
+        ) : (
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {pending.map(({ trackId, rec }) => {
+              const daysLeft = rec.review_deadline ? Math.max(0, Math.ceil((new Date(rec.review_deadline)-Date.now())/86400000)) : null;
+              return (
+                <div key={trackId} style={{padding:"12px 14px",background:"var(--surf)",borderRadius:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                    <strong>{TRACKS[trackId]?.icon} {TRACKS[trackId]?.label}</strong>
+                    <Bdg status={rec.status}/>
+                  </div>
+                  <div style={{fontSize:13,color:"var(--sub)"}}>
+                    {rec.score!==undefined ? `Score: ${rec.score}%` : "Score pending"} · {daysLeft!==null ? `${daysLeft} day(s) remaining` : "Deadline pending"}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+      <Card style={{padding:22}}>
+        <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16,marginBottom:12}}>All Tracks</h3>
+        <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(230px,1fr))",gap:12}}>
+          {TRACK_ORDER.map(trackId => {
+            const rec = amap[trackId];
+            const done = !!rec;
+            return (
+              <div key={trackId} style={{border:"1px solid var(--bdr)",borderRadius:12,padding:14,background:"#fff"}}>
+                <div style={{fontSize:20,marginBottom:4}}>{TRACKS[trackId]?.icon}</div>
+                <div style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:14,marginBottom:6}}>{TRACKS[trackId]?.label}</div>
+                <div style={{minHeight:24,marginBottom:10}}>
+                  {done ? <Bdg status={rec.status}/> : <span className="tag tg">Available</span>}
+                </div>
+                {done ? (
+                  <div style={{fontSize:12,color:"var(--sub)"}}>Already attempted. Retake disabled.</div>
+                ) : (
+                  <Btn size="sm" onClick={()=>onStartAssessment(trackId)}>Start Assessment</Btn>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{marginTop:16}}>
+          <Btn variant="outline" onClick={()=>onNav("dashboard")}>Back to Home</Btn>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 function FrDashboard({ user, onNav }) {
   const [jobs, setJobs] = useState([]);
   const [wallet, setWallet] = useState(null);
+  const pendingCount = Object.values(user.assessment_map || {}).filter(v => ["UNDER_REVIEW","ASSESSMENT_SUBMITTED"].includes(v?.status)).length;
   useEffect(()=>{ db.get(K.J).then(j=>setJobs((j||[]).filter(x=>x.status==="open").slice(0,4))); db.get(K.W).then(ws=>setWallet((ws||[]).find(w=>w.user_id===user.id))); },[]);
   return (
     <div>
@@ -1827,6 +1915,7 @@ function FrDashboard({ user, onNav }) {
         <Stat label="Open Jobs" value={jobs.length} icon="💼" color="var(--info)"/>
         <Stat label="Track" value={user.track?TRACKS[user.track]?.label.split(" ")[0]:"Not set"} icon={user.track?TRACKS[user.track]?.icon:"🎯"} color="var(--pur)"/>
         <Stat label="Status" value={user.fs||"—"} icon={user.fs==="APPROVED"?"✅":"⏳"} color={user.fs==="APPROVED"?"var(--g)":"var(--warn)"}/>
+        <Stat label="Pending Reviews" value={pendingCount} icon="🧪" color="var(--info)"/>
       </div>
       <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:20}}>
         <Card style={{padding:24}}>
@@ -1837,7 +1926,7 @@ function FrDashboard({ user, onNav }) {
         </Card>
         <Card style={{padding:24}}>
           <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16,marginBottom:14}}>Quick Links</h3>
-          {[["💼","Find Jobs","jobs"],["📤","My Proposals","applications"],["💬","Messages","messages"],["💰","Earnings","earnings"],["🎫","Support","tickets"]].map(([icon,label,key])=>(
+          {[["🧪","Assessments","assessments"],["💼","Find Jobs","jobs"],["📤","My Proposals","applications"],["💬","Messages","messages"],["💰","Earnings","earnings"],["🎫","Support","tickets"]].map(([icon,label,key])=>(
             <button key={key} className="btn bg2" onClick={()=>onNav(key)} style={{width:"100%",justifyContent:"flex-start",marginBottom:8}}><span>{icon}</span>{label}</button>
           ))}
         </Card>
@@ -2079,7 +2168,7 @@ export default function AfriGigApp() {
     try {
       const { data: profile } = await supabase.from("profiles").select("*").eq("id", authUser.id).maybeSingle();
       if (profile) {
-        u = { ...u, fs: profile.freelancer_status ?? u.fs, track: profile.track ?? u.track, assessment_pct: profile.assessment_pct ?? u.assessment_pct, assessment_unlocked: profile.assessment_unlocked ?? u.assessment_unlocked, queue_pos: profile.queue_position ?? u.queue_pos, review_deadline: profile.review_deadline ?? u.review_deadline, skills: Array.isArray(profile.skills) ? profile.skills.join(", ") : (profile.skills || u.skills), portfolio_links: Array.isArray(profile.portfolio_links) ? profile.portfolio_links.join(", ") : (profile.portfolio_links || u.portfolio_links), experience: profile.experience ?? u.experience, availability: profile.availability ?? u.availability, bio: profile.bio ?? u.bio, country: profile.country ?? u.country };
+        u = { ...u, fs: profile.freelancer_status ?? u.fs, track: profile.track ?? u.track, assessment_pct: profile.assessment_pct ?? u.assessment_pct, assessment_unlocked: profile.assessment_unlocked ?? u.assessment_unlocked, queue_pos: profile.queue_position ?? u.queue_pos, review_deadline: profile.review_deadline ?? u.review_deadline, skills: Array.isArray(profile.skills) ? profile.skills.join(", ") : (profile.skills || u.skills), portfolio_links: Array.isArray(profile.portfolio_links) ? profile.portfolio_links.join(", ") : (profile.portfolio_links || u.portfolio_links), experience: profile.experience ?? u.experience, availability: profile.availability ?? u.availability, bio: profile.bio ?? u.bio, country: profile.country ?? u.country, assessment_map: profile.assessment_map || u.assessment_map || {} };
       }
     } catch (_) {}
     return u;
@@ -2135,6 +2224,33 @@ export default function AfriGigApp() {
     window.location.reload();
   },[navigate]);
 
+  const startTrackAssessment = useCallback(async (trackId) => {
+    if (!trackId || !TRACKS[trackId] || !user) return;
+    const amap = user.assessment_map || {};
+    if (amap[trackId]) {
+      toast("You already completed this track. Retakes are disabled.","warn");
+      return;
+    }
+    const nextUser = {
+      ...user,
+      track: trackId,
+      fs: user.fs === "APPROVED" ? "APPROVED" : "ASSESSMENT_PENDING",
+      assessment_unlocked: true,
+      assessment_map: {
+        ...amap,
+        [trackId]: { status: "ASSESSMENT_PENDING", started_at: now() },
+      },
+    };
+    setUser(nextUser);
+    setShowAssessment(true);
+    try {
+      await db.patch(K.U, user.id, { track: trackId, assessment_unlocked: true, assessment_map: nextUser.assessment_map });
+    } catch (_) {}
+    try {
+      await ApiUsers.updateProfile({ track: trackId, assessment_unlocked: true, assessment_map: nextUser.assessment_map });
+    } catch (_) {}
+  }, [user, toast]);
+
   if(loading) return (
     <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--ink)"}}>
       <div style={{textAlign:"center"}}>
@@ -2157,12 +2273,12 @@ export default function AfriGigApp() {
   } else if(user.role==="freelancer"){
     if(["REJECTED","SUSPENDED"].includes(user.fs)){
       content=<StatusPage user={user}/>;
-    } else if(user.fs==="APPROVED"){
-      content=<FreelancerApp user={user} view={view} onNav={handleNav} onLogout={handleLogout} toast={toast} notifs={notifs} unread={unread} markRead={markRead} markAllRead={markAllRead}/>;
-    } else if(showAssessment||user.assessment_unlocked&&user.fs==="ASSESSMENT_PENDING"){
-      content=<AssessmentFlow user={user} onComplete={u=>{setUser(u);setShowAssessment(false);}} toast={toast} onLogout={handleLogout}/>;
+    } else if(showAssessment){
+      content=<AssessmentFlow user={user} onComplete={u=>{setUser(u);setShowAssessment(false);}} toast={toast} onLogout={handleLogout} onGoHome={()=>{setShowAssessment(false);setView("dashboard");navigate("/freelancer/dashboard");}}/>;
+    } else if((!user.fs || user.fs==="REGISTERED" || user.fs==="PROFILE_COMPLETED") || (user.fs==="ASSESSMENT_PENDING" && !user.assessment_unlocked)){
+      content=<Onboarding user={user} onUpdateUser={u=>{setUser(u);if(u.start_assessment_now===true)setShowAssessment(true);}} onLogout={handleLogout} toast={toast}/>;
     } else {
-      content=<Onboarding user={user} onUpdateUser={u=>{setUser(u);if(u.assessment_unlocked&&u.fs==="ASSESSMENT_PENDING")setShowAssessment(true);}} onLogout={handleLogout} toast={toast}/>;
+      content=<FreelancerApp user={user} view={view} onNav={handleNav} onLogout={handleLogout} toast={toast} notifs={notifs} unread={unread} markRead={markRead} markAllRead={markAllRead} onStartAssessment={startTrackAssessment}/>;
     }
   } else {
     content=<Landing navigate={navigate}/>;
