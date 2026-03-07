@@ -2421,11 +2421,16 @@ export default function AfriGigApp() {
     } else if(assessmentMode==="assessment"){
       content=<AssessmentFlow user={user} onComplete={u=>{setUser(u);setAssessmentMode(null);}} toast={toast} onLogout={handleLogout} onGoHome={()=>{setAssessmentMode(null);setView("dashboard");navigate("/freelancer/dashboard");}}/>;
     } else if(
+      // Only brand-new freelancers should see onboarding.
+      // If the user has any assessment progress signal, keep them in the freelancer home experience.
       (
         (!user.fs || user.fs==="REGISTERED" || user.fs==="PROFILE_COMPLETED") &&
+        !user.track &&
+        !user.assessment_unlocked &&
+        !user.assessment_pct &&
         Object.keys(user.assessment_map || {}).length === 0
       ) ||
-      (user.fs==="ASSESSMENT_PENDING" && !user.assessment_unlocked && !user.track)
+      (user.fs==="ASSESSMENT_PENDING" && !user.assessment_unlocked && !user.track && Object.keys(user.assessment_map || {}).length===0)
     ){
       content=<Onboarding user={user} onUpdateUser={u=>{setUser(u);if(u.start_assessment_now===true)setAssessmentMode("assessment");}} onLogout={handleLogout} toast={toast}/>;
     } else {
