@@ -1654,35 +1654,70 @@ function FRReviews({ toast }) {
   );
 }
 
+// Helper: human-readable onboarding stage label + colour
+function frStatusLabel(u){
+  if(u.role!=="freelancer") return null;
+  const fs=u.fs||"REGISTERED";
+  if(fs==="APPROVED") return {label:"Approved",color:"var(--g)",bg:"var(--gl)",icon:"✅"};
+  if(fs==="UNDER_REVIEW") return {label:"Under Review",color:"var(--pur)",bg:"#F3EDFF",icon:"🔍"};
+  if(fs==="ASSESSMENT_SUBMITTED"||fs==="ASSESSMENT_PENDING") return {label:"Assessment Done",color:"#7C3AED",bg:"#EDE9FE",icon:"📝"};
+  if(fs==="PROFILE_COMPLETED"||(fs==="REGISTERED"&&u.track)) return {label:"Profile Done",color:"var(--info)",bg:"#EFF6FF",icon:"📋"};
+  if(fs==="SUSPENDED") return {label:"Suspended",color:"var(--warn)",bg:"#FFF7ED",icon:"⏸"};
+  if(fs==="REJECTED") return {label:"Rejected",color:"var(--err)",bg:"#FEF2F2",icon:"✕"};
+  // REGISTERED with no track = genuinely incomplete
+  return {label:"Onboarding Incomplete",color:"#92400e",bg:"#FEF3C7",icon:"⚠️"};
+}
+
 function AllUsers({ toast }) {
   const [users,setUsers]=useState([]);const [search,setSearch]=useState("");const [rf,setRf]=useState("all");const [acting,setActing]=useState("");const [syncing,setSyncing]=useState(false);
+  const [editUser,setEditUser]=useState(null);// user being edited in modal
+  const [editForm,setEditForm]=useState({track:"",fs:"",note:""});
+  const [saving,setSaving]=useState(false);
+
   const load=async()=>setUsers((await db.get(K.U))||[]);
   useEffect(()=>{load();},[]);
-  // Force-sync each user's profile from Supabase (reads latest profiles table after DB trigger backfill)
+
   const syncAll=async()=>{
     setSyncing(true);
-    try {
-      // Re-fetch all profiles fresh from Supabase
-      const fresh = await db.get(K.U);
-      setUsers(fresh||[]);
-      toast(`Synced ${(fresh||[]).length} profiles from database`,"success");
-    } catch(e) {
-      toast("Sync failed: "+e.message,"error");
-    }
+    try{const fresh=await db.get(K.U);setUsers(fresh||[]);toast(`Synced ${(fresh||[]).length} profiles`,"success");}
+    catch(e){toast("Sync failed: "+e.message,"error");}
     setSyncing(false);
   };
-  const filtered=useMemo(()=>{let r=users;if(rf!=="all")r=r.filter(u=>u.role===rf);if(search)r=r.filter(u=>u.name.toLowerCase().includes(search.toLowerCase())||u.email.toLowerCase().includes(search.toLowerCase()));return r.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));},[users,search,rf]);
+
+  const openEdit=(u)=>{
+    setEditUser(u);
+    setEditForm({track:u.track||"",fs:u.fs||"REGISTERED",note:""});
+  };
+
+  const saveEdit=async()=>{
+    if(!editUser)return;
+    setSaving(true);
+    try{
+      const patch={track:editForm.track||null,fs:editForm.fs};
+      if(editForm.fs==="APPROVED") patch.approved_at=now();
+      await db.patch(K.U,editUser.id,patch);
+      const msg=editForm.note||`An admin has updated your profile status to ${editForm.fs}${editForm.track?` with track: ${TRACKS[editForm.track]?.label}`:""}. Please log in to continue.`;
+      await createNotif(editUser.id,"admin.profile_update","Profile Updated",msg);
+      await sendEmail(editUser.id,"Profile Update – AfriGig",msg);
+      await auditLog(1,"user.edit",`Admin edited ${editUser.name}: track=${editForm.track||"—"}, fs=${editForm.fs}`);
+      toast(`${editUser.name} updated`,"success");
+      setEditUser(null);load();
+    }catch(e){toast("Save failed: "+e.message,"error");}
+    setSaving(false);
+  };
+
+  const filtered=useMemo(()=>{let r=users;if(rf!=="all")r=r.filter(u=>u.role===rf);if(search)r=r.filter(u=>(u.name||"").toLowerCase().includes(search.toLowerCase())||(u.email||"").toLowerCase().includes(search.toLowerCase()));return r.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));},[users,search,rf]);
+
   const doAction=async(id,action)=>{
     const user=users.find(u=>u.id===id);if(!user)return;
     setActing(`${id}:${action}`);
     const patches={
-      suspend:    {status:"suspended",fs:"SUSPENDED"},
-      restore:    {status:"active",fs:user.fs==="SUSPENDED"?"UNDER_REVIEW":user.fs},
-      ban:        {status:"banned",fs:"REJECTED",rejection_reason:"Terminated by admin"},
-      approve:    {status:"active",fs:"APPROVED",approved_at:now()},
+      suspend:{status:"suspended",fs:"SUSPENDED"},
+      restore:{status:"active",fs:user.fs==="SUSPENDED"?"UNDER_REVIEW":user.fs},
+      ban:{status:"banned",fs:"REJECTED",rejection_reason:"Terminated by admin"},
+      approve:{status:"active",fs:"APPROVED",approved_at:now()},
     };
-    const p=patches[action];
-    if(!p){setActing("");return;}
+    const p=patches[action];if(!p){setActing("");return;}
     await db.patch(K.U,id,p);
     const msgs={
       approve:`🎉 Congratulations ${user.name}! Your AfriGig account has been approved. You can now start working!`,
@@ -1694,23 +1729,103 @@ function AllUsers({ toast }) {
     toast(`${user.name} ${action}d`,"success");
     setActing("");load();
   };
+
+  const incomplete=users.filter(u=>u.role==="freelancer"&&(!u.track)&&(!u.fs||u.fs==="REGISTERED"));
+
   return (
     <div>
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
+      {/* Edit User Modal */}
+      {editUser&&(
+        <div className="overlay" onClick={()=>setEditUser(null)}>
+          <div className="modal" style={{maxWidth:480,padding:32}} onClick={e=>e.stopPropagation()}>
+            <h3 style={{fontFamily:"var(--fh)",fontSize:20,fontWeight:700,marginBottom:6}}>Edit Freelancer Profile</h3>
+            <p style={{color:"var(--sub)",fontSize:13,marginBottom:20}}>{editUser.name} · {editUser.email}</p>
+            <div style={{marginBottom:14}}>
+              <label style={{fontSize:12,fontWeight:600,color:"var(--sub)",textTransform:"uppercase",letterSpacing:".05em",display:"block",marginBottom:6}}>Assign Track</label>
+              <select className="inp" value={editForm.track} onChange={e=>setEditForm(f=>({...f,track:e.target.value}))}>
+                <option value="">— No track yet —</option>
+                {Object.entries(TRACKS).map(([k,v])=><option key={k} value={k}>{v.icon} {v.label}</option>)}
+              </select>
+            </div>
+            <div style={{marginBottom:14}}>
+              <label style={{fontSize:12,fontWeight:600,color:"var(--sub)",textTransform:"uppercase",letterSpacing:".05em",display:"block",marginBottom:6}}>Set FR Status</label>
+              <select className="inp" value={editForm.fs} onChange={e=>setEditForm(f=>({...f,fs:e.target.value}))}>
+                {["REGISTERED","PROFILE_COMPLETED","ASSESSMENT_PENDING","ASSESSMENT_SUBMITTED","UNDER_REVIEW","APPROVED","REJECTED","SUSPENDED"].map(s=><option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+            <div style={{marginBottom:20}}>
+              <label style={{fontSize:12,fontWeight:600,color:"var(--sub)",textTransform:"uppercase",letterSpacing:".05em",display:"block",marginBottom:6}}>Notification Message (optional)</label>
+              <textarea className="inp" rows={3} value={editForm.note} onChange={e=>setEditForm(f=>({...f,note:e.target.value}))} placeholder="Leave blank for a default message…"/>
+            </div>
+            <div style={{background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:8,padding:"10px 14px",marginBottom:20,fontSize:13,color:"#92400e"}}>
+              ⚠️ Changing status to <strong>UNDER_REVIEW</strong> will add this user to the Review Queue. Setting <strong>APPROVED</strong> immediately activates their account.
+            </div>
+            <div style={{display:"flex",gap:10}}>
+              <Btn loading={saving} onClick={saveEdit}>Save Changes</Btn>
+              <Btn variant="ghost" onClick={()=>setEditUser(null)}>Cancel</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
         <h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>All Users ({users.length})</h1>
         <Btn variant="outline" loading={syncing} onClick={syncAll} icon="🔄">Sync All Profiles</Btn>
       </div>
-      <Card style={{padding:"14px 20px",marginBottom:16}}><div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}><input className="inp" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search name or email…" style={{flex:1,maxWidth:280}}/>{["all","admin","support","freelancer"].map(r=><button key={r} className={`btn ${rf===r?"bp":"bg2"} bsm`} onClick={()=>setRf(r)} style={{textTransform:"capitalize"}}>{r} ({users.filter(u=>r==="all"?true:u.role===r).length})</button>)}</div></Card>
-      <Card style={{padding:0,overflow:"hidden"}}><table><thead><tr><th>User</th><th>Role</th><th>FR Status</th><th>Track</th><th>Account</th><th>Joined</th><th>Actions</th></tr></thead><tbody>{filtered.map(u=>(<tr key={u.id}><td><div style={{display:"flex",alignItems:"center",gap:10}}><Avatar name={u.name} online={u.is_online} size={30}/><div><div style={{fontWeight:600}}>{u.name}</div><div style={{fontSize:12,color:"var(--sub)"}}>{u.email}</div></div></div></td><td><span className={`tag ${u.role==="admin"?"tr":u.role==="support"?"tb":"tg"}`}>{u.role}</span></td><td>{u.fs?<Bdg status={u.fs}/>:<span style={{color:"var(--sub)"}}>—</span>}</td><td>{u.track?<span>{TRACKS[u.track]?.icon} {TRACKS[u.track]?.label}</span>:<span style={{color:"var(--sub)"}}>—</span>}</td><td><Bdg status={u.status}/></td><td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(u.created_at)}</td>
-        <td>
-          <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-            {u.role==="freelancer"&&["UNDER_REVIEW","ASSESSMENT_PENDING","ASSESSMENT_SUBMITTED"].includes(u.fs)&&<Btn variant="primary" size="sm" loading={acting===`${u.id}:approve`} onClick={()=>doAction(u.id,"approve")}>✓ Approve</Btn>}
-            {u.role!=="admin"&&u.status!=="suspended"&&u.status!=="banned"&&<Btn variant="ghost" size="sm" loading={acting===`${u.id}:suspend`} onClick={()=>doAction(u.id,"suspend")}>⏸ Suspend</Btn>}
-            {u.status==="suspended"&&<Btn variant="outline" size="sm" loading={acting===`${u.id}:restore`} onClick={()=>doAction(u.id,"restore")}>↩ Restore</Btn>}
-            {u.role!=="admin"&&u.status!=="banned"&&<Btn variant="danger" size="sm" loading={acting===`${u.id}:ban`} onClick={()=>{if(window.confirm(`Permanently terminate ${u.name}? This cannot be undone.`))doAction(u.id,"ban");}}>⛔ Terminate</Btn>}
-          </div>
-        </td>
-      </tr>))}</tbody></table></Card>
+
+      {incomplete.length>0&&(
+        <div style={{background:"#FFFBEB",border:"1px solid #FDE68A",borderRadius:10,padding:"12px 18px",marginBottom:16,fontSize:13,color:"#92400e",display:"flex",gap:12,alignItems:"center"}}>
+          <span style={{fontSize:20}}>⚠️</span>
+          <div><strong>{incomplete.length} freelancer{incomplete.length>1?"s":""}</strong> registered but haven't completed onboarding (no track selected). Click <strong>✏️ Edit</strong> to manually assign their track and push them to review.</div>
+        </div>
+      )}
+
+      <Card style={{padding:"14px 20px",marginBottom:16}}>
+        <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}>
+          <input className="inp" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search name or email…" style={{flex:1,maxWidth:280}}/>
+          {["all","admin","support","freelancer"].map(r=>(
+            <button key={r} className={`btn ${rf===r?"bp":"bg2"} bsm`} onClick={()=>setRf(r)} style={{textTransform:"capitalize"}}>
+              {r} ({users.filter(u=>r==="all"?true:u.role===r).length})
+            </button>
+          ))}
+        </div>
+      </Card>
+
+      <Card style={{padding:0,overflow:"hidden"}}>
+        <table>
+          <thead><tr><th>User</th><th>Role</th><th>FR Status</th><th>Track</th><th>Account</th><th>Joined</th><th>Actions</th></tr></thead>
+          <tbody>{filtered.map(u=>{
+            const lbl=frStatusLabel(u);
+            return (
+              <tr key={u.id}>
+                <td><div style={{display:"flex",alignItems:"center",gap:10}}><Avatar name={u.name} online={u.is_online} size={30}/><div><div style={{fontWeight:600}}>{u.name}</div><div style={{fontSize:12,color:"var(--sub)"}}>{u.email}</div></div></div></td>
+                <td><span className={`tag ${u.role==="admin"?"tr":u.role==="support"?"tb":"tg"}`}>{u.role}</span></td>
+                <td>
+                  {lbl
+                    ? <span style={{display:"inline-flex",alignItems:"center",gap:4,padding:"3px 10px",borderRadius:20,background:lbl.bg,color:lbl.color,fontSize:12,fontWeight:700,whiteSpace:"nowrap"}}>{lbl.icon} {lbl.label}</span>
+                    : <span style={{color:"var(--sub)"}}>—</span>}
+                </td>
+                <td>
+                  {u.track
+                    ? <span style={{display:"inline-flex",alignItems:"center",gap:4,fontWeight:600,fontSize:13}}>{TRACKS[u.track]?.icon} {TRACKS[u.track]?.label}</span>
+                    : <span style={{color:"#D97706",fontSize:12,fontWeight:600}}>Not selected</span>}
+                </td>
+                <td><Bdg status={u.status}/></td>
+                <td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(u.created_at)}</td>
+                <td>
+                  <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                    {u.role==="freelancer"&&<Btn variant="ghost" size="sm" onClick={()=>openEdit(u)}>✏️ Edit</Btn>}
+                    {u.role==="freelancer"&&["UNDER_REVIEW","ASSESSMENT_PENDING","ASSESSMENT_SUBMITTED"].includes(u.fs)&&<Btn variant="primary" size="sm" loading={acting===`${u.id}:approve`} onClick={()=>doAction(u.id,"approve")}>✓ Approve</Btn>}
+                    {u.role!=="admin"&&u.status!=="suspended"&&u.status!=="banned"&&<Btn variant="ghost" size="sm" loading={acting===`${u.id}:suspend`} onClick={()=>doAction(u.id,"suspend")}>⏸ Suspend</Btn>}
+                    {u.status==="suspended"&&<Btn variant="outline" size="sm" loading={acting===`${u.id}:restore`} onClick={()=>doAction(u.id,"restore")}>↩ Restore</Btn>}
+                    {u.role!=="admin"&&u.status!=="banned"&&<Btn variant="danger" size="sm" loading={acting===`${u.id}:ban`} onClick={()=>{if(window.confirm(`Permanently terminate ${u.name}?`))doAction(u.id,"ban");}}>⛔ Terminate</Btn>}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}</tbody>
+        </table>
+      </Card>
     </div>
   );
 }
