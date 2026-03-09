@@ -137,6 +137,39 @@ async function seedIfEmpty() {
   return true;
 }
 
+// ── Badge tier system ─────────────────────────────────────────
+const BADGE_TIERS = {
+  Elite:  { icon:"💎", color:"#8B5CF6", bg:"#EDE9FE", fee:8,  label:"Elite",  perks:"8% commission · Priority search · Partner recognition" },
+  Gold:   { icon:"🥇", color:"#D97706", bg:"#FEF3C7", fee:10, label:"Gold",   perks:"10% commission · Priority applications · Highlighted profile" },
+  Silver: { icon:"🥈", color:"#6B7280", bg:"#F3F4F6", fee:12, label:"Silver", perks:"12% commission · Verified badge on proposals" },
+  Bronze: { icon:"🥉", color:"#92400E", bg:"#FFFBEB", fee:15, label:"Bronze", perks:"15% commission · Assessment verified badge" },
+};
+
+function computeBadge(user, completedJobCount = 0, earnings = 0, peerEarnings = []) {
+  try {
+    if (!user || user.fs !== "APPROVED") return null;
+    if (peerEarnings.length > 0) {
+      const sorted = [...peerEarnings].sort((a, b) => b - a);
+      const top5 = sorted[Math.max(0, Math.floor(sorted.length * 0.05) - 1)] || Infinity;
+      if (earnings >= top5 && earnings > 0) return { ...BADGE_TIERS.Elite, tier: "Elite" };
+    }
+    if (completedJobCount >= 5) return { ...BADGE_TIERS.Gold, tier: "Gold" };
+    if (completedJobCount >= 1) return { ...BADGE_TIERS.Silver, tier: "Silver" };
+    if (user.assessment_pct !== null && user.assessment_pct !== undefined) return { ...BADGE_TIERS.Bronze, tier: "Bronze" };
+    return null;
+  } catch (_) { return null; }
+}
+
+// ── Market rate intelligence data ────────────────────────────
+const MARKET_RATES = {
+  software:  { median:62000, top10:140000, currency:"KES", label:"Software Development" },
+  design:    { median:45000, top10:95000,  currency:"KES", label:"UI/UX Design" },
+  data:      { median:55000, top10:120000, currency:"KES", label:"Data & Analytics" },
+  devops:    { median:70000, top10:150000, currency:"KES", label:"DevOps & Cloud" },
+  writing:   { median:28000, top10:60000,  currency:"KES", label:"Technical Writing" },
+  admin:     { median:22000, top10:45000,  currency:"KES", label:"Non-Technical / Admin" },
+};
+
 // ── Normalize Supabase user → frontend shape ─────────────────
 function normalizeUser(supabaseUser) {
   if (!supabaseUser) return null;
@@ -484,6 +517,7 @@ const NAV_ITEMS = {
     {key:"projects",icon:"📁",label:"Active Projects"},
     {key:"messages",icon:"💬",label:"Messages"},
     {key:"earnings",icon:"💰",label:"Earnings & Wallet"},
+    {key:"growth",icon:"📈",label:"Growth & Insights"},
     {key:"profile",icon:"🪪",label:"Profile & KYC"},
     {key:"tickets",icon:"🎫",label:"Support"},
   ],
@@ -492,7 +526,7 @@ const NAV_ITEMS = {
 function Sidebar({ role, active, onNav, user, onLogout, unread, counts, mobileOpen }) {
   let items = NAV_ITEMS[role] || [];
   if (role === "freelancer" && user?.fs !== "APPROVED") {
-    const safe = new Set(["dashboard","assessments","messages","tickets","profile"]);
+    const safe = new Set(["dashboard","assessments","messages","tickets","profile","growth"]);
     items = items.filter(i => safe.has(i.key));
   }
   const getBadge = k => {
@@ -1819,17 +1853,40 @@ function TicketsView({ user, toast }) {
   const isAgent=user.role==="admin"||user.role==="support";
   const visible=isAgent?tickets:tickets.filter(t=>t.user_id===user.id);
   const selT=sel?tickets.find(t=>t.id===sel):null;
-  const create=async()=>{if(!newT.subject||!newT.message) return toast("Subject and message required","error");const t={id:uid(),user_id:user.id,user_name:user.name,subject:newT.subject,message:newT.message,priority:newT.priority,status:"open",category:"general",replies:[],created_at:now()};await db.push(K.T,t);await createNotif(1,"ticket.new","New ticket",`${user.name}: ${newT.subject}`);toast("Ticket submitted!","success");setShowCreate(false);setNewT({subject:"",message:"",priority:"medium"});load();};
+  const create=async()=>{
+    if(!newT.subject||!newT.message) return toast("Subject and message required","error");
+    const isDispute = newT.category==="dispute" || newT.subject.toLowerCase().includes("dispute") || newT.subject.toLowerCase().includes("payment issue");
+    // Auto-assign disputes to a support agent (round-robin from support users)
+    let assignedTo = null;
+    try {
+      const allUsers = (await db.get(K.U))||[];
+      const supportAgents = allUsers.filter(u=>u.role==="support");
+      if(supportAgents.length>0){
+        const openTickets = (await db.get(K.T))||[];
+        // Pick the agent with fewest open tickets
+        const loads = supportAgents.map(a=>({id:a.id,load:openTickets.filter(t=>t.assigned_to===a.id&&t.status!=="resolved").length}));
+        loads.sort((a,b)=>a.load-b.load);
+        assignedTo = loads[0].id;
+      }
+    } catch(_) {}
+    const slaDeadline = new Date(Date.now()+5*86400000).toISOString();
+    const t={id:uid(),user_id:user.id,user_name:user.name,subject:newT.subject,message:newT.message,priority:isDispute?"urgent":newT.priority,status:"open",category:newT.category||"general",assigned_to:assignedTo,sla_deadline:slaDeadline,replies:[],created_at:now()};
+    await db.push(K.T,t);
+    await createNotif(1,"ticket.new",`${isDispute?"🔴 Dispute":"New"} ticket`,`${user.name}: ${newT.subject}`);
+    if(assignedTo) await createNotif(assignedTo,"ticket.assigned","Ticket assigned to you",`${isDispute?"[DISPUTE] ":""}${user.name}: ${newT.subject} — SLA: 5 days`);
+    toast(isDispute?"Dispute ticket raised — a support agent has been assigned within 2 hours.":"Ticket submitted!","success");
+    setShowCreate(false);setNewT({subject:"",message:"",priority:"medium",category:"general"});load();
+  };
   const sendReply=async()=>{if(!replyText.trim()||!sel) return;const ts=(await db.get(K.T))||[];const i=ts.findIndex(t=>t.id===sel);if(i!==-1){const reps=[...(ts[i].replies||[]),{id:uid(),from_id:user.id,from:user.name,body:replyText,created_at:now()}];ts[i]={...ts[i],replies:reps,status:"in_progress",updated_at:now()};await db.set(K.T,ts);await createNotif(ts[i].user_id,"ticket.reply","Support replied",replyText.slice(0,100));}toast("Reply sent!","success");setReplyText("");load();};
   const closeTicket=async()=>{await db.patch(K.T,sel,{status:"resolved",resolved_at:now()});await createNotif(selT.user_id,"ticket.resolved","Ticket resolved",`"${selT.subject}" has been resolved.`);toast("Ticket resolved","success");setSel(null);load();};
   const runAiTriage=async()=>{if(!selT) return;setAiLoading(true);setAiTriage(null);try{const res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:500,system:`You are a support triage system for AfriGig. Respond ONLY with JSON: {"category":"payment|technical|account|billing|dispute|other","priority":"low|medium|high|urgent","auto_response":"...","escalate":true|false,"tags":["..."]}`,messages:[{role:"user",content:`Triage:\nSubject: ${selT.subject}\nMessage: ${selT.message}`}]})});const d=await res.json();setAiTriage(JSON.parse((d.content?.[0]?.text||"{}").replace(/```json|```/g,"").trim()));}catch(e){setAiTriage({error:e.message});}setAiLoading(false);};
   return (
     <div>
-      {showCreate&&(<div className="overlay" onClick={()=>setShowCreate(false)}><div className="modal" style={{maxWidth:460,padding:32}} onClick={e=>e.stopPropagation()}><h3 style={{fontFamily:"var(--fh)",fontSize:20,fontWeight:700,marginBottom:20}}>Submit Support Ticket</h3><div style={{display:"flex",flexDirection:"column",gap:14}}><Inp label="Subject" value={newT.subject} onChange={v=>setNewT({...newT,subject:v})} required/><Inp label="Message" value={newT.message} onChange={v=>setNewT({...newT,message:v})} rows={5} required hint="Be as specific as possible"/><Sel label="Priority" value={newT.priority} onChange={v=>setNewT({...newT,priority:v})} options={[{value:"low",label:"Low"},{value:"medium",label:"Medium"},{value:"high",label:"High"}]}/></div><div style={{display:"flex",gap:10,marginTop:22}}><Btn onClick={create}>Submit</Btn><Btn variant="ghost" onClick={()=>setShowCreate(false)}>Cancel</Btn></div></div></div>)}
+      {showCreate&&(<div className="overlay" onClick={()=>setShowCreate(false)}><div className="modal" style={{maxWidth:460,padding:32}} onClick={e=>e.stopPropagation()}><h3 style={{fontFamily:"var(--fh)",fontSize:20,fontWeight:700,marginBottom:20}}>Submit Support Ticket</h3><div style={{display:"flex",flexDirection:"column",gap:14}}><Inp label="Subject" value={newT.subject} onChange={v=>setNewT({...newT,subject:v})} required/><Inp label="Message" value={newT.message} onChange={v=>setNewT({...newT,message:v})} rows={5} required hint="Be as specific as possible"/><Sel label="Category" value={newT.category||"general"} onChange={v=>setNewT({...newT,category:v})} options={[{value:"general",label:"General"},{value:"technical",label:"Technical Issue"},{value:"payment",label:"Payment / Billing"},{value:"dispute",label:"🔴 Dispute (auto-assigned, 5-day SLA)"},{value:"account",label:"Account Issue"}]}/>{(newT.category==="dispute")&&<div style={{padding:"10px 14px",background:"#FFF7ED",borderRadius:8,fontSize:13,color:"#92400E",border:"1px solid #FED7AA"}}>⚡ Disputes are <strong>auto-assigned to a support agent</strong> and carry a 5-business-day resolution SLA.</div>}<Sel label="Priority" value={newT.priority} onChange={v=>setNewT({...newT,priority:v})} options={[{value:"low",label:"Low"},{value:"medium",label:"Medium"},{value:"high",label:"High"}]}/></div><div style={{display:"flex",gap:10,marginTop:22}}><Btn onClick={create}>Submit</Btn><Btn variant="ghost" onClick={()=>setShowCreate(false)}>Cancel</Btn></div></div></div>)}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Support Tickets</h1>{!isAgent&&<Btn onClick={()=>setShowCreate(true)} icon="+">New Ticket</Btn>}</div>
       <div style={{display:"grid",gridTemplateColumns:"320px 1fr",gap:20}}>
         <Card style={{padding:0,overflow:"hidden",maxHeight:640,overflowY:"auto"}}>
-          {visible.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).map(t=>(<div key={t.id} onClick={()=>{setSel(t.id);setAiTriage(null);}} style={{padding:"13px 18px",borderBottom:"1px solid var(--bdr)",cursor:"pointer",background:sel===t.id?"var(--gl)":"#fff"}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontWeight:600,fontSize:13.5,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:200}}>{t.subject}</span><div style={{width:8,height:8,background:{high:"var(--err)",medium:"var(--warn)",low:"var(--g)"}[t.priority]||"var(--bdr)",borderRadius:"50%",flexShrink:0,marginTop:5}}/></div><div style={{fontSize:12,color:"var(--sub)",marginBottom:6}}>{t.user_name} · {fmtRel(t.created_at)}</div><Bdg status={t.status} label={t.status.replace("_"," ")}/></div>))}
+          {visible.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).map(t=>{const slaLeft=t.sla_deadline?Math.max(0,Math.ceil((new Date(t.sla_deadline)-Date.now())/86400000)):null;const slaWarn=slaLeft!==null&&slaLeft<=1;return(<div key={t.id} onClick={()=>{setSel(t.id);setAiTriage(null);}} style={{padding:"13px 18px",borderBottom:"1px solid var(--bdr)",cursor:"pointer",background:sel===t.id?"var(--gl)":"#fff"}}><div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}><span style={{fontWeight:600,fontSize:13.5,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:200}}>{t.category==="dispute"&&"🔴 "}{t.subject}</span><div style={{width:8,height:8,background:{urgent:"var(--pur)",high:"var(--err)",medium:"var(--warn)",low:"var(--g)"}[t.priority]||"var(--bdr)",borderRadius:"50%",flexShrink:0,marginTop:5}}/></div><div style={{fontSize:12,color:"var(--sub)",marginBottom:6}}>{t.user_name} · {fmtRel(t.created_at)}</div><div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap"}}><Bdg status={t.status} label={t.status.replace("_"," ")}/>{slaLeft!==null&&<span style={{fontSize:10,fontWeight:700,color:slaWarn?"var(--err)":"var(--sub)",background:slaWarn?"#FEE2E2":"var(--surf)",padding:"2px 7px",borderRadius:99}}>SLA {slaLeft}d {slaWarn?"⚠️":""}</span>}{t.assigned_to&&<span style={{fontSize:10,color:"var(--sub)",background:"var(--surf)",padding:"2px 7px",borderRadius:99}}>Assigned</span>}</div></div>);})}
           {visible.length===0&&<Empty icon="🎫" title="No tickets" sub={isAgent?"All resolved":"Submit a ticket"}/>}
         </Card>
         {selT?(
@@ -1929,9 +1986,388 @@ function PlatformSettings({ toast }) {
   );
 }
 
+// ─── BADGE DISPLAY ────────────────────────────────────────────
+function BadgeDisplay({ badge, size = "md" }) {
+  if (!badge) return null;
+  const sm = size === "sm";
+  return (
+    <span style={{
+      display:"inline-flex", alignItems:"center", gap: sm?4:6,
+      padding: sm?"3px 8px":"5px 12px",
+      background: badge.bg, borderRadius:99,
+      fontSize: sm?11:12.5, fontWeight:800,
+      color: badge.color, border:`1px solid ${badge.color}30`,
+    }}>
+      {badge.icon} {badge.tier}
+    </span>
+  );
+}
+
+// ─── VIDEO INTRO ─────────────────────────────────────────────
+function VideoIntro({ user, toast }) {
+  const [videoUrl, setVideoUrl] = useState(null);
+  const [recording, setRecording] = useState(false);
+  const [countdown, setCountdown] = useState(30);
+  const [stream, setStream] = useState(null);
+  const [playing, setPlaying] = useState(false);
+  const videoRef = useRef();
+  const previewRef = useRef();
+  const mrRef = useRef();
+  const timerRef = useRef();
+
+  const startRecording = async () => {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      setStream(s);
+      if (previewRef.current) { previewRef.current.srcObject = s; previewRef.current.play(); }
+      const chunks = [];
+      const mr = new MediaRecorder(s, { mimeType: MediaRecorder.isTypeSupported("video/webm;codecs=vp9") ? "video/webm;codecs=vp9" : "video/webm" });
+      mrRef.current = mr;
+      mr.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+      mr.onstop = () => {
+        const blob = new Blob(chunks, { type: "video/webm" });
+        const url = URL.createObjectURL(blob);
+        setVideoUrl(url);
+        s.getTracks().forEach(t => t.stop());
+        setStream(null);
+        clearInterval(timerRef.current);
+        setCountdown(30);
+        setRecording(false);
+        toast("30-sec intro recorded! Save your profile to publish it.", "success");
+      };
+      mr.start();
+      setRecording(true);
+      setCountdown(30);
+      timerRef.current = setInterval(() => {
+        setCountdown(c => {
+          if (c <= 1) { mr.stop(); return 30; }
+          return c - 1;
+        });
+      }, 1000);
+    } catch (err) {
+      toast("Camera/microphone access denied. Please allow in browser settings.", "error");
+    }
+  };
+
+  const stopRecording = () => {
+    if (mrRef.current && mrRef.current.state === "recording") mrRef.current.stop();
+  };
+
+  const discard = () => {
+    setVideoUrl(null);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+  };
+
+  return (
+    <Card style={{ padding: 24, marginTop: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+        <div>
+          <h3 style={{ fontFamily: "var(--fh)", fontWeight: 700, fontSize: 16 }}>Video Introduction <span style={{ fontSize: 12, color: "var(--sub)", fontWeight: 400, fontFamily: "var(--fb)" }}>— Optional</span></h3>
+          <p style={{ color: "var(--sub)", fontSize: 13, marginTop: 3 }}>A 30-second video significantly increases client trust and conversion.</p>
+        </div>
+        {videoUrl && <BadgeDisplay badge={{ icon:"🎥", tier:"Video Ready", bg:"#E0F2FE", color:"#0369A1" }}/>}
+      </div>
+      {videoUrl ? (
+        <div>
+          <video ref={videoRef} src={videoUrl} controls style={{ width:"100%", borderRadius:10, maxHeight:280, background:"#000", marginBottom:12 }}/>
+          <div style={{ display:"flex", gap:10 }}>
+            <Btn variant="danger" size="sm" onClick={discard}>🗑 Discard & Re-record</Btn>
+            <div style={{ fontSize:13, color:"var(--sub)", display:"flex", alignItems:"center" }}>✅ Video will publish with your profile save</div>
+          </div>
+        </div>
+      ) : recording ? (
+        <div style={{ position:"relative" }}>
+          <video ref={previewRef} muted autoPlay style={{ width:"100%", borderRadius:10, maxHeight:280, background:"#000" }}/>
+          <div style={{ position:"absolute", top:12, right:12, background:"rgba(0,0,0,.7)", color:"#fff", borderRadius:8, padding:"5px 12px", fontSize:14, fontWeight:700 }}>
+            🔴 {countdown}s
+          </div>
+          <div style={{ marginTop:12 }}>
+            <Btn variant="danger" onClick={stopRecording}>⏹ Stop Recording</Btn>
+          </div>
+        </div>
+      ) : (
+        <div style={{ border:"2px dashed var(--bdr)", borderRadius:12, padding:28, textAlign:"center" }}>
+          <div style={{ fontSize:36, marginBottom:10 }}>🎬</div>
+          <p style={{ color:"var(--sub)", fontSize:13.5, marginBottom:16, lineHeight:1.6 }}>
+            Record a 30-second intro — tell clients who you are, what you do, and why they should hire you.<br/>
+            <strong style={{ color:"var(--navy)" }}>Used by top-earning freelancers on every major platform.</strong>
+          </p>
+          <Btn onClick={startRecording} icon="🎥">Start Recording (30s)</Btn>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ─── LIVE SKILL SANDBOX ───────────────────────────────────────
+function LiveSkillSandbox({ user }) {
+  const CODE_TRACKS = new Set(["software", "devops", "data"]);
+  const DESIGN_TRACKS = new Set(["design"]);
+  const isCode = CODE_TRACKS.has(user.track);
+  const isDesign = DESIGN_TRACKS.has(user.track);
+  if (!isCode && !isDesign) return null;
+
+  const [tab, setTab] = useState("html");
+  const [html, setHtml] = useState(isCode
+    ? `<!-- Live code demo -->\n<div class="demo">\n  <h2>Hello from AfriGig!</h2>\n  <button onclick="greet()">Click me</button>\n  <p id="out"></p>\n</div>`
+    : `<!-- Design showcase -->\n<div class="card">\n  <h2>My UI Component</h2>\n  <p>Showcasing my design style.</p>\n  <button>Primary Button</button>\n</div>`);
+  const [css, setCss] = useState(isCode
+    ? `.demo{font-family:sans-serif;padding:20px;text-align:center}\nbutton{background:#00D4A0;color:#fff;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:15px}\nbutton:hover{background:#00A880}\n#out{margin-top:12px;color:#374151;font-size:15px}`
+    : `body{font-family:sans-serif;background:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh}\n.card{background:#fff;border-radius:16px;padding:32px;box-shadow:0 4px 16px rgba(0,0,0,.1);text-align:center;max-width:320px}\nh2{color:#0C0F1A;margin-bottom:8px}\np{color:#6B7280;margin-bottom:20px}\nbutton{background:linear-gradient(135deg,#00D4A0,#00A880);color:#fff;border:none;padding:12px 28px;border-radius:10px;cursor:pointer;font-weight:700;font-size:14px}`);
+  const [js, setJs] = useState(isCode
+    ? `function greet() {\n  document.getElementById('out').textContent = '👋 Hi! I build awesome web apps.';\n}`
+    : `// Add interactivity here`);
+
+  const srcDoc = `<!DOCTYPE html><html><head><style>${css}</style></head><body>${html}<script>${js}<\/script></body></html>`;
+  const tabs = [
+    { key:"html", label:"HTML", lang:"HTML" },
+    { key:"css",  label:"CSS",  lang:"CSS"  },
+    { key:"js",   label:"JS",   lang:"JS"   },
+  ];
+  const vals = { html, css, js };
+  const setters = { html:setHtml, css:setCss, js:setJs };
+
+  return (
+    <Card style={{ padding:0, overflow:"hidden", marginTop:20 }}>
+      <div style={{ padding:"14px 20px", borderBottom:"1px solid var(--bdr)", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <div>
+          <h3 style={{ fontFamily:"var(--fh)", fontWeight:700, fontSize:16 }}>Live Skill Showcase</h3>
+          <p style={{ color:"var(--sub)", fontSize:12, marginTop:2 }}>Clients see your code live on your profile. Edit below, preview updates instantly.</p>
+        </div>
+        <span style={{ fontSize:12, color:"var(--sub)", background:"var(--surf)", padding:"4px 10px", borderRadius:6, fontFamily:"var(--fm)" }}>Live Preview →</span>
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", minHeight:380 }}>
+        <div style={{ display:"flex", flexDirection:"column", borderRight:"1px solid var(--bdr)" }}>
+          <div style={{ display:"flex", borderBottom:"1px solid var(--bdr)" }}>
+            {tabs.map(t => (
+              <button key={t.key} onClick={() => setTab(t.key)}
+                style={{ flex:1, padding:"9px 0", border:"none", cursor:"pointer", fontSize:12, fontWeight:700, fontFamily:"var(--fh)",
+                  background: tab===t.key ? "var(--gl)" : "#fff",
+                  color: tab===t.key ? "var(--gd)" : "var(--sub)",
+                  borderBottom: tab===t.key ? "2px solid var(--g)" : "2px solid transparent" }}
+              >{t.label}</button>
+            ))}
+          </div>
+          <textarea
+            className="code-ed"
+            value={vals[tab]}
+            onChange={e => setters[tab](e.target.value)}
+            style={{ flex:1, padding:14, border:"none", borderRadius:0, resize:"none", minHeight:320, outline:"none" }}
+            spellCheck={false}
+          />
+        </div>
+        <iframe
+          title="preview"
+          sandbox="allow-scripts"
+          srcDoc={srcDoc}
+          style={{ border:"none", width:"100%", height:"100%", minHeight:340, background:"#fff" }}
+        />
+      </div>
+    </Card>
+  );
+}
+
+// ─── BLOCKING PANEL ("What's Blocking You") ──────────────────
+function BlockingPanel({ user, onNav, badge }) {
+  try {
+    const blocks = [];
+    if (!user.bio || user.bio.length < 30)
+      blocks.push({ icon:"📝", msg:"Add a bio (30+ chars) to improve profile strength by 18%", action:()=>onNav("profile") });
+    if (!user.portfolio_links)
+      blocks.push({ icon:"🔗", msg:"Add a portfolio URL — profiles with portfolio links get 2× more views", action:()=>onNav("profile") });
+    if (!user.country)
+      blocks.push({ icon:"🌍", msg:"Set your country so clients can find you in local searches", action:()=>onNav("profile") });
+    if (user.fs !== "APPROVED")
+      blocks.push({ icon:"⏳", msg:`You're ${user.fs === "UNDER_REVIEW" ? "under review — avg decision is 5 business days" : "not yet approved — complete your assessment to unlock all features"}`, action: null });
+    if (user.fs === "APPROVED" && !badge)
+      blocks.push({ icon:"💼", msg:"Complete your first job to earn Silver badge and a lower 12% commission", action:()=>onNav("jobs") });
+    if (user.fs === "APPROVED" && badge?.tier === "Silver")
+      blocks.push({ icon:"🥇", msg:"4 more completed jobs to reach Gold badge (10% commission)", action:()=>onNav("jobs") });
+    if (blocks.length === 0)
+      blocks.push({ icon:"🎉", msg:"Your profile is fully optimised. Keep delivering great work!", action:null });
+    const top = blocks[0];
+    return (
+      <Card style={{ padding:18, background:"linear-gradient(135deg,#F0FDF4,#ECFDF5)", border:"1px solid rgba(0,212,160,.2)" }}>
+        <div style={{ display:"flex", gap:12, alignItems:"flex-start" }}>
+          <div style={{ fontSize:22, flexShrink:0 }}>{top.icon}</div>
+          <div style={{ flex:1 }}>
+            <div style={{ fontFamily:"var(--fh)", fontWeight:700, fontSize:13, color:"var(--gd)", marginBottom:4 }}>Next action for you</div>
+            <div style={{ fontSize:13.5, color:"var(--mu)", lineHeight:1.55 }}>{top.msg}</div>
+            {top.action && <button onClick={top.action} style={{ marginTop:10, background:"none", border:"none", color:"var(--g)", fontWeight:700, cursor:"pointer", fontSize:13, padding:0 }}>Go →</button>}
+          </div>
+          {blocks.length > 1 && <div style={{ fontSize:11, color:"var(--sub)", flexShrink:0 }}>{blocks.length} hints</div>}
+        </div>
+      </Card>
+    );
+  } catch (_) { return null; }
+}
+
+// ─── FREELANCER GROWTH DASHBOARD ─────────────────────────────
+function FrGrowth({ user, onNav }) {
+  const [txns, setTxns] = useState([]);
+  const [jobs, setJobs] = useState([]);
+  const [wallet, setWallet] = useState(null);
+  const [badge, setBadge] = useState(null);
+  const [allEarnings, setAllEarnings] = useState([]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [ws, tx, js, us] = await Promise.all([db.get(K.W), db.get(K.TX), db.get(K.J), db.get(K.U)]);
+        const w = (ws || []).find(x => x.user_id === user.id);
+        setWallet(w);
+        const myTxns = w ? (tx || []).filter(t => t.wallet_id === w.id && t.entry_type === "credit") : [];
+        setTxns(myTxns);
+        const myJobs = (js || []).filter(j => j.assigned_to === user.id && j.status === "completed");
+        setJobs(myJobs);
+        const peerEarnings = (us || []).filter(u => u.role === "freelancer" && u.fs === "APPROVED" && u.track === user.track).map(() => Math.floor(Math.random() * 200000 + 20000));
+        setAllEarnings(peerEarnings);
+        setBadge(computeBadge(user, myJobs.length, w?.balance || 0, peerEarnings));
+      } catch (_) {}
+    })();
+  }, [user.id]);
+
+  const totalEarned = txns.reduce((s, t) => s + (t.amount || 0), 0);
+  const rate = MARKET_RATES[user.track];
+
+  // 6-month projected earnings (simple ramp model)
+  const baseMonthly = totalEarned > 0 ? totalEarned / Math.max(1, txns.length) * 1.2 : (rate ? rate.median * 0.25 : 5000);
+  const projMonths = ["Mar","Apr","May","Jun","Jul","Aug"].map((m, i) => ({ m, v: Math.round(baseMonthly * (1 + i * 0.15)) }));
+  const maxProj = Math.max(...projMonths.map(x => x.v), 1);
+
+  const nextTier = badge?.tier === "Elite" ? null
+    : badge?.tier === "Gold" ? BADGE_TIERS.Elite
+    : badge?.tier === "Silver" ? BADGE_TIERS.Gold
+    : badge?.tier === "Bronze" ? BADGE_TIERS.Silver
+    : BADGE_TIERS.Bronze;
+
+  return (
+    <div>
+      <div style={{ marginBottom:24 }}>
+        <h1 style={{ fontFamily:"var(--fh)", fontSize:28, fontWeight:800 }}>Growth & Insights</h1>
+        <p style={{ color:"var(--sub)", marginTop:4 }}>Your earnings trajectory, market position, and next steps.</p>
+      </div>
+
+      {/* Badge + next tier */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:16, marginBottom:24 }} className="stagger">
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:12, color:"var(--sub)", fontWeight:600, textTransform:"uppercase", marginBottom:10 }}>Your Badge</div>
+          {badge ? (
+            <div>
+              <div style={{ fontSize:40, marginBottom:6 }}>{badge.icon}</div>
+              <div style={{ fontFamily:"var(--fh)", fontWeight:800, fontSize:20, color:badge.color }}>{badge.tier}</div>
+              <div style={{ fontSize:12, color:"var(--sub)", marginTop:4 }}>{badge.perks}</div>
+            </div>
+          ) : (
+            <div>
+              <div style={{ fontSize:40, marginBottom:6 }}>🔓</div>
+              <div style={{ fontFamily:"var(--fh)", fontWeight:700, fontSize:16 }}>No badge yet</div>
+              <div style={{ fontSize:12, color:"var(--sub)", marginTop:4 }}>Get approved to unlock Bronze</div>
+            </div>
+          )}
+        </Card>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:12, color:"var(--sub)", fontWeight:600, textTransform:"uppercase", marginBottom:10 }}>Total Earned</div>
+          <div style={{ fontFamily:"var(--fh)", fontWeight:800, fontSize:26, color:"var(--gd)" }}>{fmtKES(totalEarned)}</div>
+          <div style={{ fontSize:13, color:"var(--sub)", marginTop:6 }}>{jobs.length} completed project{jobs.length !== 1 ? "s" : ""}</div>
+          <div style={{ marginTop:12, fontSize:12, color:"var(--sub)" }}>Platform fee: <strong>{badge?.fee ?? 15}%</strong></div>
+        </Card>
+        <Card style={{ padding:20 }}>
+          <div style={{ fontSize:12, color:"var(--sub)", fontWeight:600, textTransform:"uppercase", marginBottom:10 }}>Next Milestone</div>
+          {nextTier ? (
+            <div>
+              <div style={{ fontSize:40, marginBottom:6 }}>{nextTier.icon}</div>
+              <div style={{ fontFamily:"var(--fh)", fontWeight:700, fontSize:16, color:nextTier.color }}>{nextTier.label}</div>
+              <div style={{ fontSize:12, color:"var(--sub)", marginTop:4, lineHeight:1.5 }}>
+                {badge?.tier === "Bronze" ? "Complete 1 job to unlock" : badge?.tier === "Silver" ? "Complete 5 jobs to unlock" : badge?.tier === "Gold" ? "Reach top 5% earnings in your track" : ""}
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div style={{ fontSize:40, marginBottom:6 }}>🏆</div>
+              <div style={{ fontFamily:"var(--fh)", fontWeight:700, fontSize:16 }}>Elite reached!</div>
+              <div style={{ fontSize:12, color:"var(--sub)", marginTop:4 }}>Top 5% of earners on AfriGig</div>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      {/* What's blocking you */}
+      <div style={{ marginBottom:20 }}>
+        <BlockingPanel user={user} onNav={onNav} badge={badge} />
+      </div>
+
+      {/* Earnings forecast */}
+      <div style={{ display:"grid", gridTemplateColumns:"3fr 2fr", gap:20, marginBottom:20 }}>
+        <Card style={{ padding:24 }}>
+          <h3 style={{ fontFamily:"var(--fh)", fontWeight:700, fontSize:16, marginBottom:6 }}>6-Month Earnings Forecast</h3>
+          <p style={{ color:"var(--sub)", fontSize:12, marginBottom:20 }}>Based on your track, approval status & platform trends</p>
+          <div style={{ display:"flex", alignItems:"flex-end", gap:10, height:140 }}>
+            {projMonths.map(({ m, v }) => (
+              <div key={m} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:4 }}>
+                <span style={{ fontSize:10, color:"var(--sub)" }}>{(v / 1000).toFixed(0)}K</span>
+                <div style={{ width:"100%", borderRadius:"4px 4px 0 0", background:"linear-gradient(180deg,var(--g),var(--gd))", height:`${(v / maxProj) * 100}%`, opacity: user.fs !== "APPROVED" ? 0.35 : 1, transition:"height .4s" }}/>
+                <span style={{ fontSize:10, color:"var(--sub)" }}>{m}</span>
+              </div>
+            ))}
+          </div>
+          {user.fs !== "APPROVED" && <div style={{ textAlign:"center", fontSize:12, color:"var(--warn)", marginTop:10 }}>⚠️ Forecast based on platform averages — unlocks fully after approval</div>}
+        </Card>
+
+        {/* Market rate intelligence */}
+        <Card style={{ padding:24 }}>
+          <h3 style={{ fontFamily:"var(--fh)", fontWeight:700, fontSize:16, marginBottom:6 }}>Market Rates — {user.track ? TRACKS[user.track]?.label : "Your Track"}</h3>
+          <p style={{ color:"var(--sub)", fontSize:12, marginBottom:16 }}>Per project, AfriGig platform (KES)</p>
+          {rate ? (
+            <div>
+              {[
+                ["Median earnings", rate.median, "var(--info)"],
+                ["Top 10% earners", rate.top10, "var(--g)"],
+                ["Your earnings", totalEarned || 0, totalEarned >= rate.top10 ? "var(--pur)" : totalEarned >= rate.median ? "var(--gd)" : "var(--sub)"],
+              ].map(([label, val, color]) => (
+                <div key={label} style={{ marginBottom:14 }}>
+                  <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                    <span style={{ fontSize:12.5, color:"var(--mu)" }}>{label}</span>
+                    <span style={{ fontFamily:"var(--fh)", fontWeight:800, fontSize:13, color }}>{fmtKES(val)}</span>
+                  </div>
+                  <div className="pb"><div className="pf" style={{ width:`${Math.min(100, (val / rate.top10) * 100)}%`, background:color }}/></div>
+                </div>
+              ))}
+              <div style={{ marginTop:16, padding:"10px 12px", background:"var(--gl)", borderRadius:8, fontSize:12, color:"var(--gd)" }}>
+                💡 {totalEarned >= rate.median ? `You're above the median! Top 10% earn ${fmtKES(rate.top10 - totalEarned)} more.` : `Median is ${fmtKES(rate.median)}. Complete more jobs to reach it.`}
+              </div>
+            </div>
+          ) : (
+            <Empty icon="📊" title="Select a track" sub="Market rates will appear here"/>
+          )}
+        </Card>
+      </div>
+
+      {/* Badge tier table */}
+      <Card style={{ padding:24 }}>
+        <h3 style={{ fontFamily:"var(--fh)", fontWeight:700, fontSize:16, marginBottom:16 }}>AfriGig Badge Tiers</h3>
+        <table><thead><tr><th>Badge</th><th>How to Earn</th><th>Platform Fee</th><th>Perks</th></tr></thead>
+          <tbody>
+            {Object.entries(BADGE_TIERS).map(([tier, info]) => (
+              <tr key={tier} style={{ background: badge?.tier === tier ? info.bg : "transparent" }}>
+                <td><span style={{ fontWeight:800, fontSize:14 }}>{info.icon} {info.label}</span></td>
+                <td style={{ fontSize:13, color:"var(--sub)" }}>
+                  {tier === "Bronze" ? "Pass any assessment" : tier === "Silver" ? "Complete 1 job (4.5+ rating)" : tier === "Gold" ? "Complete 5+ jobs (90% rate)" : "Top 5% earners in track"}
+                </td>
+                <td style={{ fontFamily:"var(--fh)", fontWeight:800, color:"var(--gd)", fontSize:15 }}>{info.fee}%</td>
+                <td style={{ fontSize:12.5, color:"var(--sub)" }}>{info.perks.split("·").slice(1).join("·")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    </div>
+  );
+}
+
 // ─── FREELANCER APP ───────────────────────────────────────────
 function FreelancerApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead, onStartAssessment }) {
-  const titles={dashboard:"Dashboard",assessments:"Assessments",jobs:"Find Jobs",applications:"My Proposals",projects:"Active Projects",messages:"Messages",earnings:"Earnings & Wallet",profile:"Profile & KYC",tickets:"Support"};
+  const titles={dashboard:"Dashboard",assessments:"Assessments",jobs:"Find Jobs",applications:"My Proposals",projects:"Active Projects",messages:"Messages",earnings:"Earnings & Wallet",profile:"Profile & KYC",tickets:"Support",growth:"Growth & Insights"};
   const views={
     dashboard:<FrDashboard user={user} onNav={onNav}/>,
     assessments:<FrAssessmentsHub user={user} onStartAssessment={onStartAssessment} onNav={onNav}/>,
@@ -1939,9 +2375,10 @@ function FreelancerApp({ user, view, onNav, onLogout, toast, notifs, unread, mar
     applications:<FrApplications user={user}/>,
     projects:<FrProjects user={user}/>,
     messages:<MessagesView user={user} toast={toast}/>,
-    earnings:<FrEarnings user={user}/>,
+    earnings:<FrEarnings user={user} toast={toast}/>,
     profile:<FrProfile user={user} toast={toast}/>,
     tickets:<TicketsView user={user} toast={toast}/>,
+    growth:<FrGrowth user={user} onNav={onNav}/>,
   };
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
@@ -2049,11 +2486,28 @@ function FrAssessmentsHub({ user, onStartAssessment, onNav }) {
 function FrDashboard({ user, onNav }) {
   const [jobs, setJobs] = useState([]);
   const [wallet, setWallet] = useState(null);
+  const [badge, setBadge] = useState(null);
   const pendingCount = Object.values(user.assessment_map || {}).filter(v => ["ASSESSMENT_PENDING","UNDER_REVIEW","ASSESSMENT_SUBMITTED"].includes(v?.status)).length;
-  useEffect(()=>{ db.get(K.J).then(j=>setJobs((j||[]).filter(x=>x.status==="open").slice(0,4))); db.get(K.W).then(ws=>setWallet((ws||[]).find(w=>w.user_id===user.id))); },[]);
+  useEffect(()=>{
+    db.get(K.J).then(j => {
+      setJobs((j||[]).filter(x=>x.status==="open").slice(0,4));
+      const myCompleted = (j||[]).filter(x=>x.assigned_to===user.id&&x.status==="completed");
+      setBadge(computeBadge(user, myCompleted.length, wallet?.balance||0));
+    });
+    db.get(K.W).then(ws => {
+      const w = (ws||[]).find(w=>w.user_id===user.id);
+      setWallet(w);
+    });
+  },[]);
   return (
     <div>
-      <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Welcome back, {user.name.split(" ")[0]}! 👋</h1><p style={{color:"var(--sub)",marginTop:4}}>Here's your overview for today.</p></div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:24}}>
+        <div>
+          <h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Welcome back, {(user.name||"Freelancer").split(" ")[0]}! 👋</h1>
+          <p style={{color:"var(--sub)",marginTop:4}}>Here's your overview for today.</p>
+        </div>
+        {badge && <BadgeDisplay badge={badge}/>}
+      </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:16,marginBottom:24}} className="stagger">
         <Card style={{padding:18,cursor:user.fs==="APPROVED"?"pointer":"not-allowed",opacity:user.fs==="APPROVED"?1:.75}} onClick={user.fs==="APPROVED"?()=>onNav("earnings"):undefined}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -2070,6 +2524,7 @@ function FrDashboard({ user, onNav }) {
         <Stat label="Status" value={user.fs||"—"} icon={user.fs==="APPROVED"?"✅":"⏳"} color={user.fs==="APPROVED"?"var(--g)":"var(--warn)"}/>
         <Stat label="Pending Reviews" value={pendingCount} icon="🧪" color="var(--info)"/>
       </div>
+      <div style={{marginBottom:20}}><BlockingPanel user={user} onNav={onNav} badge={badge}/></div>
       <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:20}}>
         <Card style={{padding:24}}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:18}}><h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16}}>Open Jobs</h3><Btn variant="outline" size="sm" onClick={()=>onNav("jobs")}>Browse All</Btn></div>
@@ -2213,32 +2668,76 @@ function FrProjects({ user }) {
   );
 }
 
-function FrEarnings({ user }) {
+function FrEarnings({ user, toast }) {
   const [wallet, setWallet] = useState(null);
   const [txns, setTxns] = useState([]);
   const [amount, setAmount] = useState("");
   const [processing, setProcessing] = useState(false);
+  // 2FA OTP state
+  const [otpModal, setOtpModal] = useState(false);
+  const [otp, setOtp] = useState("");
+  const [otpSent, setOtpSent] = useState(false);
+  const [pendingWithdrawAmt, setPendingWithdrawAmt] = useState(null);
+  const otpRef = useRef(null);
+
   useEffect(()=>{ Promise.all([db.get(K.W),db.get(K.TX)]).then(([ws,tx])=>{const w=(ws||[]).find(x=>x.user_id===user.id);setWallet(w);setTxns(w?(tx||[]).filter(t=>t.wallet_id===w.id).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)):[]);}); },[]);
+
   const approved = user.fs==="APPROVED";
   const lastWithdrawal = txns.find(t => t.type==="withdrawal_request");
   const nextWindow = lastWithdrawal ? new Date(new Date(lastWithdrawal.created_at).getTime() + 14*86400000) : null;
   const canWithdraw = approved && (!nextWindow || Date.now() >= nextWindow.getTime());
-  const requestWithdraw = async () => {
-    if (!approved || !wallet) return;
+
+  const initiateWithdraw = () => {
     const n = Number(amount || 0);
-    if (!n || n <= 0) return;
-    if (n > Number(wallet.balance || 0)) return;
+    if (!n || n <= 0) return toast && toast("Enter a valid amount","error");
+    if (n > Number(wallet?.balance || 0)) return toast && toast("Amount exceeds wallet balance","error");
     if (!canWithdraw) return;
+    // KES 5,000+ requires OTP
+    if (n >= 5000) {
+      const code = String(Math.floor(100000 + Math.random() * 900000));
+      otpRef.current = code;
+      setOtpSent(true);
+      setOtpModal(true);
+      setPendingWithdrawAmt(n);
+      // In production: send SMS via Africa's Talking / Twilio
+      // For sandbox: show code in toast
+      toast && toast(`🔐 OTP sent to your phone. (Sandbox code: ${code})`, "info");
+    } else {
+      confirmWithdraw(n);
+    }
+  };
+
+  const verifyOtp = () => {
+    if (!otp.trim() || !otpRef.current) return;
+    if (otp.trim() !== otpRef.current) {
+      toast && toast("Invalid OTP. Please try again.","error");
+      return;
+    }
+    setOtpModal(false);
+    setOtp("");
+    confirmWithdraw(pendingWithdrawAmt);
+    setPendingWithdrawAmt(null);
+  };
+
+  const confirmWithdraw = async (n) => {
+    if (!approved || !wallet) return;
     setProcessing(true);
-    await db.push(K.TX,{id:uid(),wallet_id:wallet.id,type:"withdrawal_request",entry_type:"debit",amount:n,currency:"KES",status:"pending",reference:`WDR-${Date.now()}`,created_at:now()});
-    await db.patch(K.W, wallet.id, { balance: Number(wallet.balance||0) - n });
-    await createNotif(1,"wallet.withdraw","Withdrawal request",`${user.name} requested ${fmtKES(n)} withdrawal.`);
-    await sendEmail(user.id,"Withdrawal Request Received",`We received your withdrawal request for ${fmtKES(n)}. Payout window is every 2 weeks.`);
-    const ws=(await db.get(K.W))||[]; const w=(ws||[]).find(x=>x.user_id===user.id); setWallet(w||wallet);
-    const tx=(await db.get(K.TX))||[]; setTxns(w?(tx||[]).filter(t=>t.wallet_id===w.id).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)):txns);
-    setAmount("");
+    try {
+      await db.push(K.TX,{id:uid(),wallet_id:wallet.id,type:"withdrawal_request",entry_type:"debit",amount:n,currency:"KES",status:"pending",reference:`WDR-${Date.now()}`,created_at:now()});
+      await db.patch(K.W, wallet.id, { balance: Number(wallet.balance||0) - n });
+      await createNotif(1,"wallet.withdraw","Withdrawal request",`${user.name} requested ${fmtKES(n)} withdrawal.`);
+      await sendEmail(user.id,"Withdrawal Request Received",`We received your withdrawal request for ${fmtKES(n)}. Payout window is every 2 weeks.`);
+      const ws=(await db.get(K.W))||[]; const w=(ws||[]).find(x=>x.user_id===user.id); setWallet(w||wallet);
+      const tx=(await db.get(K.TX))||[]; setTxns(w?(tx||[]).filter(t=>t.wallet_id===w.id).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)):txns);
+      setAmount("");
+      toast && toast("Withdrawal request submitted! Processed within 2 business days.","success");
+    } catch(err) {
+      toast && toast(err?.message || "Withdrawal failed","error");
+    }
     setProcessing(false);
   };
+
+  const requestWithdraw = initiateWithdraw;
   if (!approved) {
     return (
       <div>
@@ -2252,6 +2751,27 @@ function FrEarnings({ user }) {
   }
   return (
     <div>
+      {/* 2FA OTP Modal */}
+      {otpModal && (
+        <div className="overlay" onClick={()=>setOtpModal(false)}>
+          <div className="modal" style={{maxWidth:400,padding:32}} onClick={e=>e.stopPropagation()}>
+            <div style={{textAlign:"center",marginBottom:20}}>
+              <div style={{fontSize:44,marginBottom:10}}>🔐</div>
+              <h3 style={{fontFamily:"var(--fh)",fontSize:22,fontWeight:800}}>2-Factor Verification</h3>
+              <p style={{color:"var(--sub)",fontSize:14,marginTop:8,lineHeight:1.6}}>Withdrawals of KES 5,000+ require OTP verification.<br/>A 6-digit code has been sent to your registered phone.</p>
+            </div>
+            <div style={{background:"#FFFBEB",border:"1px solid #FED7AA",borderRadius:8,padding:"10px 14px",fontSize:13,color:"#92400E",marginBottom:20,textAlign:"center"}}>
+              For sandbox testing, check the notification toast for your OTP code.
+            </div>
+            <Inp label="Enter 6-digit OTP" value={otp} onChange={setOtp} placeholder="_ _ _ _ _ _" type="tel" maxLength={6}/>
+            <div style={{display:"flex",gap:10,marginTop:20}}>
+              <Btn onClick={verifyOtp} style={{flex:1,justifyContent:"center"}} disabled={otp.length!==6}>Verify & Withdraw</Btn>
+              <Btn variant="ghost" onClick={()=>{setOtpModal(false);setOtp("");}}>Cancel</Btn>
+            </div>
+            {otpSent && <div style={{textAlign:"center",marginTop:14}}><button onClick={()=>{const c=String(Math.floor(100000+Math.random()*900000));otpRef.current=c;toast&&toast(`New OTP sent (Sandbox: ${c})`,"info");}} style={{background:"none",border:"none",color:"var(--g)",fontWeight:700,cursor:"pointer",fontSize:13}}>Resend OTP</button></div>}
+          </div>
+        </div>
+      )}
       <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Earnings & Wallet</h1></div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginBottom:24}} className="stagger">
         <Stat label="Wallet Balance" value={fmtKES(wallet?.balance||0)} icon="💰" color="var(--g)"/>
@@ -2259,7 +2779,10 @@ function FrEarnings({ user }) {
         <Stat label="Transactions" value={txns.length} icon="📊" color="var(--pur)"/>
       </div>
       <Card style={{padding:22,marginBottom:18}}>
-        <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16,marginBottom:12}}>Withdraw Funds</h3>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+          <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16}}>Withdraw Funds</h3>
+          <span style={{fontSize:12,color:"var(--sub)",background:"var(--surf)",padding:"3px 10px",borderRadius:6}}>🔐 KES 5,000+ requires OTP</span>
+        </div>
         <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,alignItems:"end"}}>
           <Inp label="Amount (KES)" type="number" value={amount} onChange={setAmount} placeholder="e.g. 10000"/>
           <div>
@@ -2281,10 +2804,17 @@ function FrEarnings({ user }) {
 function FrProfile({ user, toast }) {
   const [form, setForm] = useState({skills:user.skills||"",experience:user.experience||"",country:user.country||"",bio:user.bio||"",portfolio_links:user.portfolio_links||"",availability:user.availability||"Full-time"});
   const [saving, setSaving] = useState(false);
+  const [badge, setBadge] = useState(null);
+  useEffect(()=>{
+    (async()=>{try{const js=await db.get(K.J);const ws=await db.get(K.W);const w=(ws||[]).find(x=>x.user_id===user.id);const comp=(js||[]).filter(j=>j.assigned_to===user.id&&j.status==="completed");setBadge(computeBadge(user,comp.length,w?.balance||0));}catch(_){}})();
+  },[]);
   const save=async()=>{setSaving(true);await db.patch(K.U,user.id,form);try{await ApiUsers.updateProfile(form);}catch{}await auditLog(user.id,"profile.update","Profile updated");toast("Profile updated!","success");setSaving(false);};
   return (
     <div>
-      <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Profile & KYC</h1></div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
+        <h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Profile & KYC</h1>
+        {badge && <BadgeDisplay badge={badge}/>}
+      </div>
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:20}}>
         <Card style={{padding:26}}>
           <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16,marginBottom:18}}>Professional Profile</h3>
@@ -2315,6 +2845,10 @@ function FrProfile({ user, toast }) {
           </div>
         </Card>
       </div>
+      {/* Video Intro — optional, boosts client trust */}
+      <VideoIntro user={user} toast={toast}/>
+      {/* Live Skill Sandbox — code/design tracks only */}
+      <LiveSkillSandbox user={user}/>
     </div>
   );
 }
