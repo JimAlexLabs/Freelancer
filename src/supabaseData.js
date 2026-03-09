@@ -484,4 +484,22 @@ export const db = {
   },
 };
 
+/**
+ * Update a user's online presence directly (bypasses toProfileUpdate mapping).
+ * Called every 30s by the usePresence hook.
+ */
+export async function updatePresence(userId, { online, activity }) {
+  if (!userId) return;
+  try {
+    await supabase.from("profiles").update({
+      is_online: online,
+      last_seen: new Date().toISOString(),
+      current_activity: online ? (activity || "Online") : null,
+      updated_at: new Date().toISOString(),
+    }).eq("id", userId);
+  } catch (e) {
+    // Presence failures are non-critical; silent ignore
+  }
+}
+
 export { K, getAdminId, getAdminProfile, resolveUserId };

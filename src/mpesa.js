@@ -1,139 +1,138 @@
 /**
- * AfriGig M-Pesa Daraja Sandbox Integration
- * Consumer Key / Secret from Safaricom Developer Portal (sandbox)
- * Uses test shortcode 174379 for Lipa Na M-Pesa Online (STK Push)
+ * AfriGig M-Pesa Daraja Integration
+ *
+ * On Vercel (production/preview): all calls go through /api/mpesa serverless proxy
+ *   → server-side, no CORS issues, works 100%.
+ * On localhost: attempts direct Daraja sandbox call; falls back gracefully if CORS blocks.
  */
 
-const DARAJA_BASE      = "https://sandbox.safaricom.co.ke";
-const CONSUMER_KEY     = "Xml8kY4zKJQAGkDrgCANsJZpQRdrhsXHFricpYvscLI4IDk0";
-const CONSUMER_SECRET  = "vWIijx6cBoPqGcjuUOMyLLsBZhzYs1EIsemlae9Zb1bT4Zl1GXuf5q8ggLbhq7vs";
+const DARAJA  = "https://sandbox.safaricom.co.ke";
+// Fallback direct credentials (only used on localhost)
+const CK      = "Xml8kY4zKJQAGkDrgCANsJZpQRdrhsXHFricpYvscLI4IDk0";
+const CS      = "vWIijx6cBoPqGcjuUOMyLLsBZhzYs1EIsemlae9Zb1bT4Zl1GXuf5q8ggLbhq7vs";
+const SC      = "174379";
+const PASSKEY = "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919";
 
-// Daraja sandbox test shortcode + passkey (replace with your live ones in production)
-const SHORTCODE = "174379";
-const PASSKEY   = "bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919";
+// Use server proxy when deployed to Vercel (avoids CORS entirely)
+const USE_PROXY = typeof window !== "undefined" &&
+  (window.location.hostname.includes("vercel.app") || window.location.hostname.includes("afrigig"));
 
-// Callback URL: in production, point this to your backend / Supabase Edge Function
-const CALLBACK_URL =
-  (typeof window !== "undefined" && window.location.origin.includes("localhost"))
-    ? "https://webhook.site/afrigig-sandbox-dev"
-    : "https://freelancer-bice.vercel.app/api/mpesa/callback";
+const PROXY = "/api/mpesa";
 
-function getTimestamp() {
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+function ts() {
+  const d = new Date(), p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
-/**
- * Fetch an OAuth2 access token from Daraja.
- * NOTE: This call may fail in-browser due to CORS on some networks;
- * a Supabase/Vercel edge-function proxy is recommended for production.
- */
-async function getAccessToken() {
-  const credentials = btoa(`${CONSUMER_KEY}:${CONSUMER_SECRET}`);
-  const res = await fetch(
-    `${DARAJA_BASE}/oauth/v1/generate?grant_type=client_credentials`,
-    {
-      method: "GET",
-      headers: { Authorization: `Basic ${credentials}` },
-    }
-  );
-  if (!res.ok) throw new Error(`Daraja auth failed: ${res.status}`);
-  const data = await res.json();
-  if (!data.access_token) throw new Error("No access token in Daraja response");
-  return data.access_token;
+async function directToken() {
+  const creds = btoa(`${CK}:${CS}`);
+  const r = await fetch(`${DARAJA}/oauth/v1/generate?grant_type=client_credentials`, {
+    headers: { Authorization: `Basic ${creds}` },
+  });
+  if (!r.ok) throw new Error(`Daraja auth ${r.status}`);
+  const d = await r.json();
+  return d.access_token;
+}
+
+export async function getAccessToken() {
+  if (USE_PROXY) {
+    const r = await fetch(`${PROXY}?action=token`);
+    const d = await r.json();
+    return d.access_token;
+  }
+  return directToken();
 }
 
 /**
  * Initiate Lipa Na M-Pesa Online (STK Push).
  * @param {object} opts
- * @param {string} opts.phone      - Phone in format 254XXXXXXXXX
- * @param {number} opts.amount     - Amount in KES (integer)
- * @param {string} opts.reference  - Account reference (≤12 chars)
- * @param {string} opts.desc       - Transaction description (≤13 chars)
- * @returns {Promise<{checkoutRequestId: string, responseDescription: string}>}
+ * @param {string} opts.phone   - Phone: 254XXXXXXXXX
+ * @param {number} opts.amount  - Amount in KES
+ * @param {string} [opts.reference]
+ * @param {string} [opts.desc]
  */
-async function stkPush({ phone, amount, reference = "AfriGig", desc = "Assessment Fee" }) {
-  // Normalize phone: strip leading +/0, ensure 254XXXXXXXXX
-  const normalizedPhone = phone
-    .replace(/\s+/g, "")
-    .replace(/^\+/, "")
-    .replace(/^0/, "254");
+export async function stkPush({ phone, amount, reference = "AfriGig", desc = "Assessment Fee" }) {
+  const norm = String(phone).replace(/\s+/g,"").replace(/^\+/,"").replace(/^0/,"254");
 
-  const token     = await getAccessToken();
-  const timestamp = getTimestamp();
-  const password  = btoa(`${SHORTCODE}${PASSKEY}${timestamp}`);
+  // ── Via Vercel proxy (no CORS) ───────────────────────────────────────────
+  if (USE_PROXY) {
+    const r = await fetch(`${PROXY}?action=stk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: norm, amount, reference, desc }),
+    });
+    const d = await r.json();
+    if (!r.ok || d.errorCode) throw new Error(d.errorMessage || d.ResponseDescription || `STK Push failed (${r.status})`);
+    if (d.ResponseCode !== "0") throw new Error(d.ResponseDescription || "STK Push not accepted");
+    return {
+      checkoutRequestId:   d.CheckoutRequestID,
+      merchantRequestId:   d.MerchantRequestID,
+      responseDescription: d.ResponseDescription,
+      customerMessage:     d.CustomerMessage,
+    };
+  }
 
-  const payload = {
-    BusinessShortCode: SHORTCODE,
-    Password:          password,
-    Timestamp:         timestamp,
-    TransactionType:   "CustomerPayBillOnline",
-    Amount:            Math.max(1, Math.ceil(amount)),
-    PartyA:            normalizedPhone,
-    PartyB:            SHORTCODE,
-    PhoneNumber:       normalizedPhone,
-    CallBackURL:       CALLBACK_URL,
-    AccountReference:  reference.slice(0, 12),
-    TransactionDesc:   desc.slice(0, 13),
-  };
+  // ── Direct call (localhost dev, may hit CORS) ────────────────────────────
+  const t   = await directToken();
+  const now = ts();
+  const pwd = btoa(`${SC}${PASSKEY}${now}`);
+  const cb  = "https://webhook.site/afrigig-sandbox-dev";
 
-  const res = await fetch(`${DARAJA_BASE}/mpesa/stkpush/v1/processrequest`, {
-    method:  "POST",
-    headers: {
-      Authorization:  `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
+  const r = await fetch(`${DARAJA}/mpesa/stkpush/v1/processrequest`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      BusinessShortCode: SC, Password: pwd, Timestamp: now,
+      TransactionType: "CustomerPayBillOnline",
+      Amount: Math.max(1, Math.ceil(Number(amount))),
+      PartyA: norm, PartyB: SC, PhoneNumber: norm, CallBackURL: cb,
+      AccountReference: String(reference).slice(0, 12),
+      TransactionDesc: String(desc).slice(0, 13),
+    }),
   });
-
-  const data = await res.json();
-
-  if (!res.ok || data.errorCode) {
-    throw new Error(data.errorMessage || data.ResponseDescription || `STK Push failed (${res.status})`);
-  }
-  if (data.ResponseCode !== "0") {
-    throw new Error(data.ResponseDescription || "STK Push was not accepted");
-  }
-
+  const d = await r.json();
+  if (!r.ok || d.errorCode) throw new Error(d.errorMessage || `STK Push failed (${r.status})`);
+  if (d.ResponseCode !== "0") throw new Error(d.ResponseDescription || "STK Push not accepted");
   return {
-    checkoutRequestId:  data.CheckoutRequestID,
-    merchantRequestId:  data.MerchantRequestID,
-    responseDescription: data.ResponseDescription,
-    customerMessage:    data.CustomerMessage,
+    checkoutRequestId: d.CheckoutRequestID,
+    merchantRequestId: d.MerchantRequestID,
+    responseDescription: d.ResponseDescription,
+    customerMessage: d.CustomerMessage,
   };
 }
 
 /**
- * Query the status of a pending STK push.
+ * Query STK push status.
  */
-async function queryStatus(checkoutRequestId) {
-  const token     = await getAccessToken();
-  const timestamp = getTimestamp();
-  const password  = btoa(`${SHORTCODE}${PASSKEY}${timestamp}`);
-
-  const res = await fetch(`${DARAJA_BASE}/mpesa/stkpushquery/v1/query`, {
-    method:  "POST",
-    headers: {
-      Authorization:  `Bearer ${token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      BusinessShortCode: SHORTCODE,
-      Password:          password,
-      Timestamp:         timestamp,
-      CheckoutRequestID: checkoutRequestId,
-    }),
+export async function queryStatus(checkoutRequestId) {
+  if (USE_PROXY) {
+    const r = await fetch(`${PROXY}?action=status`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ checkoutRequestId }),
+    });
+    const d = await r.json();
+    return {
+      resultCode: d.ResultCode, resultDesc: d.ResultDesc,
+      success: d.ResultCode === "0" || d.ResultCode === 0,
+      cancelled: d.ResultCode === "1032",
+      pending: d.ResultCode === undefined,
+    };
+  }
+  const t   = await directToken();
+  const now = ts();
+  const pwd = btoa(`${SC}${PASSKEY}${now}`);
+  const r = await fetch(`${DARAJA}/mpesa/stkpushquery/v1/query`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ BusinessShortCode: SC, Password: pwd, Timestamp: now, CheckoutRequestID: checkoutRequestId }),
   });
-
-  const data = await res.json();
-  // ResultCode 0 = success, 1032 = request cancelled by user, others = pending/error
+  const d = await r.json();
   return {
-    resultCode:       data.ResultCode,
-    resultDesc:       data.ResultDesc,
-    success:          data.ResultCode === "0" || data.ResultCode === 0,
-    cancelled:        data.ResultCode === "1032",
-    pending:          data.ResultCode === undefined,
+    resultCode: d.ResultCode, resultDesc: d.ResultDesc,
+    success: d.ResultCode === "0" || d.ResultCode === 0,
+    cancelled: d.ResultCode === "1032",
+    pending: d.ResultCode === undefined,
   };
 }
 

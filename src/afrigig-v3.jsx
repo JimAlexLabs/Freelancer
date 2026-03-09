@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { Auth as ApiAuth, Users as ApiUsers } from "./api.js";
 import { supabase } from "./supabaseClient.js";
-import { db, K, getAdminId, getAdminProfile } from "./supabaseData.js";
+import { db, K, getAdminId, getAdminProfile, updatePresence } from "./supabaseData.js";
 import Mpesa from "./mpesa.js";
 
 /* AfriGig Platform v3.0 */
@@ -357,6 +357,32 @@ function useNotifs(userId) {
   const markRead = useCallback(async id => { await db.patch(K.N,id,{is_read:true}); refresh(); }, [refresh]);
   const markAllRead = useCallback(async () => { const all=(await db.get(K.N))||[]; await db.set(K.N,all.map(n=>n.user_id===userId?{...n,is_read:true}:n)); refresh(); }, [userId,refresh]);
   return { notifs, unread, markRead, markAllRead, refresh };
+}
+
+/**
+ * usePresence — heartbeat that keeps is_online, last_seen, and current_activity
+ * up-to-date in Supabase every 30 seconds. Sets offline on unmount / tab close.
+ * @param {string|null} userId
+ * @param {string}      activity  - human-readable label e.g. "On Dashboard"
+ */
+function usePresence(userId, activity) {
+  useEffect(() => {
+    if (!userId) return;
+    let alive = true;
+    const beat = async () => {
+      if (alive) await updatePresence(userId, { online: true, activity });
+    };
+    beat(); // immediate ping on mount / view change
+    const tid = setInterval(beat, 30_000);
+    const goOffline = () => updatePresence(userId, { online: false, activity: null });
+    window.addEventListener("beforeunload", goOffline);
+    return () => {
+      alive = false;
+      clearInterval(tid);
+      window.removeEventListener("beforeunload", goOffline);
+      goOffline();
+    };
+  }, [userId, activity]);
 }
 
 function useTimer(totalSec, onExpire, autoStart=false) {
@@ -1205,6 +1231,7 @@ function StatusPage({ user }) {
 
 // ─── ASSESSMENT FLOW ──────────────────────────────────────────
 function AssessmentFlow({ user, onComplete, toast, onLogout, onGoHome }) {
+  usePresence(user?.id, "Taking Assessment 🎯");
   const track=TRACKS[user.track]||TRACKS.software;
   const [phase, setPhase] = useState("intro");
   const [coreAns, setCoreAns] = useState({});
@@ -1251,10 +1278,17 @@ function AssessmentFlow({ user, onComplete, toast, onLogout, onGoHome }) {
     // Best-effort background write of assessment results
     (async()=>{
       try {
-        if(i!==-1){
-          users[i]={...users[i],assessment_score:score,assessment_max:total,assessment_pct:pct,assessment_submitted_at:now(),fs:"UNDER_REVIEW",queue_pos:inReview+1,review_deadline:reviewDl,assessment_map:nextAssessmentMap,updated_at:now()};
-          await db.set(K.U,users);
-        }
+        // Use db.patch (single row UPDATE) — never rewrite the entire users array
+        await db.patch(K.U, user.id, {
+          fs: "UNDER_REVIEW",
+          assessment_score: score,
+          assessment_max: total,
+          assessment_pct: pct,
+          assessment_submitted_at: now(),
+          queue_pos: inReview + 1,
+          review_deadline: reviewDl,
+          assessment_map: nextAssessmentMap,
+        });
         // Persist status into auth metadata so future logins don't send the freelancer back to onboarding/assessment
         try {
           await ApiUsers.updateProfile({
@@ -1492,6 +1526,7 @@ function useDashCounts() {
 
 // ─── ADMIN APP ────────────────────────────────────────────────
 function AdminApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead }) {
+  usePresence(user?.id, `Admin: ${view||"dashboard"}`);
   const counts=useDashCounts();
   const titles={dashboard:"Dashboard",registrations:"New Registrations",reviews:"FR Reviews",users:"All Users",jobs:"Job Management",payments:"Payments & Escrow",messages:"Messages",tickets:"Support Tickets",emails:"Email Log",reports:"Analytics",audit:"Audit Log",settings:"Platform Settings"};
   const views={
@@ -1521,18 +1556,87 @@ function AdminApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead
 
 function AdminOverview({ onNav }) {
   const [data,setData]=useState(null);
-  useEffect(()=>{const load=async()=>{const [users,jobs,tickets,escrows]=await Promise.all([db.get(K.U),db.get(K.J),db.get(K.T),db.get(K.E)]);const frs=(users||[]).filter(u=>u.role==="freelancer");setData({frs,jobs:jobs||[],tickets:tickets||[],escrows:escrows||[]});};load();},[]);
+  const [liveUsers,setLiveUsers]=useState([]);
+
+  // Initial load
+  useEffect(()=>{
+    const load=async()=>{
+      const [users,jobs,tickets,escrows]=await Promise.all([db.get(K.U),db.get(K.J),db.get(K.T),db.get(K.E)]);
+      const frs=(users||[]).filter(u=>u.role==="freelancer");
+      setData({frs,all:users||[],jobs:jobs||[],tickets:tickets||[],escrows:escrows||[]});
+      // Compute "live" = last_seen within last 3 minutes
+      const cutoff=new Date(Date.now()-3*60*1000);
+      setLiveUsers((users||[]).filter(u=>u.last_seen&&new Date(u.last_seen)>cutoff));
+    };
+    load();
+  },[]);
+
+  // Supabase Realtime: subscribe to profile presence changes
+  useEffect(()=>{
+    const channel=supabase.channel("admin-presence")
+      .on("postgres_changes",{event:"UPDATE",schema:"public",table:"profiles"},(payload)=>{
+        const p=payload.new;
+        if(!p) return;
+        setLiveUsers(prev=>{
+          const cutoff=new Date(Date.now()-3*60*1000);
+          // Rebuild live list: update or add this user, remove stale ones
+          const updated=prev.filter(u=>u.id!==p.id&&new Date(u.last_seen||0)>cutoff);
+          if(p.last_seen&&new Date(p.last_seen)>cutoff) updated.push(p);
+          return updated;
+        });
+        // Also update main data stats
+        setData(d=>{
+          if(!d) return d;
+          return {...d, all:d.all.map(u=>u.id===p.id?{...u,...p}:u), frs:d.frs.map(u=>u.id===p.id?{...u,...p}:u)};
+        });
+      })
+      .subscribe();
+    return ()=>supabase.removeChannel(channel);
+  },[]);
+
   const months=["Aug","Sep","Oct","Nov","Dec","Jan","Feb"];
   const barData=[32,45,38,52,61,47,58];const max=Math.max(...barData);
+
   return (
     <div>
       <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Admin Dashboard</h1><p style={{color:"var(--sub)",marginTop:4}}>Live platform overview.</p></div>
+
+      {/* Stats row */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:16,marginBottom:24}} className="stagger">
+        <Stat label="Live Now" value={liveUsers.length} icon="🟢" color="var(--g)"/>
         <Stat label="Under Review" value={data?data.frs.filter(u=>u.fs==="UNDER_REVIEW").length:"…"} icon="🔍" color="var(--pur)" loading={!data}/>
         <Stat label="New Registrations" value={data?data.frs.filter(u=>["REGISTERED","PROFILE_COMPLETED"].includes(u.fs)).length:"…"} icon="🆕" color="var(--info)" loading={!data}/>
         <Stat label="Approved Freelancers" value={data?data.frs.filter(u=>u.fs==="APPROVED").length:"…"} icon="✅" color="var(--g)" loading={!data}/>
         <Stat label="Escrow Held" value={data?fmtKES(data.escrows.filter(e=>e.status==="holding").reduce((s,e)=>s+e.amount,0)):"…"} icon="🔒" color="var(--warn)" loading={!data}/>
       </div>
+
+      {/* Live Users panel */}
+      <Card style={{padding:20,marginBottom:20,border:"2px solid var(--gl)"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{width:10,height:10,borderRadius:"50%",background:"var(--g)",display:"inline-block",boxShadow:"0 0 0 3px rgba(0,212,160,.25)",animation:"pulse 2s ease infinite"}}/>
+            <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16}}>Live on Platform</h3>
+            <span style={{background:"var(--gl)",color:"var(--gd)",fontSize:11,fontWeight:800,padding:"2px 8px",borderRadius:20}}>{liveUsers.length} online</span>
+          </div>
+          <span style={{fontSize:11,color:"var(--sub)"}}>Updates in real-time · active within 3 min</span>
+        </div>
+        {liveUsers.length===0
+          ? <div style={{color:"var(--sub)",fontSize:13,padding:"12px 0"}}>No users currently active. Presence updates automatically when users log in.</div>
+          : <div style={{display:"flex",flexWrap:"wrap",gap:10}}>
+              {liveUsers.sort((a,b)=>new Date(b.last_seen)-new Date(a.last_seen)).map(u=>(
+                <div key={u.id} style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",background:"var(--surf)",borderRadius:10,border:"1px solid var(--bdr)",minWidth:200}}>
+                  <Avatar name={u.name} online size={32}/>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{u.name}</div>
+                    <div style={{fontSize:11,color:"var(--sub)"}}>{u.current_activity||"Online"}</div>
+                  </div>
+                  <div style={{fontSize:10,color:"var(--g)",fontWeight:700}}>{u.last_seen?`${Math.round((Date.now()-new Date(u.last_seen))/60000)}m`:""}</div>
+                </div>
+              ))}
+            </div>
+        }
+      </Card>
+
       <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:20,marginBottom:20}}>
         <Card style={{padding:24}}>
           <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16,marginBottom:20}}>Applications — Last 7 Months</h3>
@@ -1633,10 +1737,39 @@ function FRReviews({ toast }) {
                 <div style={{display:"flex",gap:14,alignItems:"center"}}><Avatar name={selUser.name} size={52} online={selUser.is_online}/><div><h2 style={{fontFamily:"var(--fh)",fontSize:22,fontWeight:800}}>{selUser.name}</h2><div style={{color:"var(--sub)",fontSize:13}}>{selUser.email} · {selUser.country}</div><div style={{display:"flex",gap:8,marginTop:7}}><Bdg status={selUser.fs}/>{selUser.track&&<span className="tag tg">{TRACKS[selUser.track]?.icon} {TRACKS[selUser.track]?.label}</span>}</div></div></div>
                 {selUser.assessment_pct!==undefined&&<div style={{width:76,height:76,background:selUser.assessment_pct>=60?"var(--gl)":"#FEF2F2",borderRadius:"50%",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",border:`3px solid ${selUser.assessment_pct>=60?"var(--g)":"var(--err)"}`,flexShrink:0}}><div style={{fontFamily:"var(--fh)",fontWeight:800,fontSize:20,color:selUser.assessment_pct>=60?"var(--gd)":"var(--err)"}}>{selUser.assessment_pct}%</div><div style={{fontSize:10,color:"var(--sub)"}}>Score</div></div>}
               </div>
+              {/* Assessment Score Breakdown from assessment_map */}
+              {selUser.assessment_map&&Object.keys(selUser.assessment_map).length>0&&(
+                <div style={{marginBottom:16,padding:16,background:"#F8FAFC",borderRadius:10,border:"1px solid var(--bdr)"}}>
+                  <div style={{fontSize:11,color:"var(--sub)",textTransform:"uppercase",letterSpacing:".05em",fontWeight:700,marginBottom:10}}>📊 Assessment Results by Track</div>
+                  {Object.entries(selUser.assessment_map).map(([track,data])=>{
+                    const score=data.score??data.pct??0;
+                    const pass=score>=60;
+                    return (
+                      <div key={track} style={{display:"flex",alignItems:"center",gap:10,marginBottom:8,padding:"8px 12px",background:"#fff",borderRadius:8,border:`1px solid ${pass?"var(--gl)":"#FEE2E2"}`}}>
+                        <span style={{fontSize:16}}>{TRACKS[track]?.icon||"📋"}</span>
+                        <div style={{flex:1}}>
+                          <div style={{fontSize:13,fontWeight:600}}>{TRACKS[track]?.label||track}</div>
+                          <div style={{fontSize:11,color:"var(--sub)"}}>{data.submitted_at?`Submitted ${fmtDate(data.submitted_at)}`:""} {data.status?`· ${data.status}`:""}</div>
+                        </div>
+                        {/* Score bar */}
+                        <div style={{width:120}}>
+                          <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:3}}>
+                            <span style={{color:pass?"var(--gd)":"var(--err)",fontWeight:800}}>{score}%</span>
+                            <span style={{color:"var(--sub)"}}>{pass?"✓ PASS":"✗ FAIL"}</span>
+                          </div>
+                          <div style={{height:6,background:"var(--bdr)",borderRadius:3}}>
+                            <div style={{height:"100%",borderRadius:3,background:pass?"var(--g)":"var(--err)",width:`${score}%`,transition:"width .5s ease"}}/>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:20}}>
-                {[["Skills",selUser.skills],["Experience",selUser.experience],["Availability",selUser.availability],["Portfolio",selUser.portfolio_links||"Not provided"],["Queue Pos",selUser.queue_pos?`#${selUser.queue_pos}`:"—"],["Submitted",selUser.assessment_submitted_at?fmtDate(selUser.assessment_submitted_at):"—"]].map(([l,v])=>(<div key={l} style={{padding:"10px 14px",background:"var(--surf)",borderRadius:8}}><div style={{fontSize:11,color:"var(--sub)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:3}}>{l}</div><div style={{fontSize:13.5,fontWeight:500,wordBreak:"break-word"}}>{v||"—"}</div></div>))}
+                {[["Skills",selUser.skills],["Experience",selUser.experience],["Availability",selUser.availability],["Portfolio",selUser.portfolio_links||"Not provided"],["Queue Pos",selUser.queue_pos?`#${selUser.queue_pos}`:"—"],["Submitted",selUser.assessment_submitted_at?fmtDate(selUser.assessment_submitted_at):"—"],["Country",selUser.country||"—"],["Bio",selUser.bio||"—"]].map(([l,v])=>(<div key={l} style={{padding:"10px 14px",background:"var(--surf)",borderRadius:8}}><div style={{fontSize:11,color:"var(--sub)",textTransform:"uppercase",letterSpacing:".05em",marginBottom:3}}>{l}</div><div style={{fontSize:13.5,fontWeight:500,wordBreak:"break-word"}}>{v||"—"}</div></div>))}
               </div>
-              {selUser.bio&&<p style={{fontSize:14,color:"var(--mu)",lineHeight:1.7,marginBottom:20}}>{selUser.bio}</p>}
               <div style={{display:"flex",gap:10,paddingTop:20,borderTop:"1px solid var(--bdr)",flexWrap:"wrap"}}>
                 <Btn loading={acting==="approve"} onClick={()=>doAction("approve")} icon="✓">Approve</Btn>
                 <Btn variant="danger" onClick={()=>doAction("reject")} icon="✕">Reject</Btn>
@@ -2498,6 +2631,9 @@ function FrGrowth({ user, onNav }) {
 
 // ─── FREELANCER APP ───────────────────────────────────────────
 function FreelancerApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead, onStartAssessment }) {
+  // Map view keys to human-readable activity labels for admin live view
+  const ACTIVITY_LABELS = {dashboard:"On Dashboard",assessments:"Viewing Assessments",jobs:"Browsing Jobs",applications:"Viewing Proposals",projects:"On Active Projects",messages:"In Messages",earnings:"Viewing Wallet",profile:"Updating Profile",tickets:"In Support",growth:"Viewing Growth"};
+  usePresence(user?.id, ACTIVITY_LABELS[view] || "Online");
   const titles={dashboard:"Dashboard",assessments:"Assessments",jobs:"Find Jobs",applications:"My Proposals",projects:"Active Projects",messages:"Messages",earnings:"Earnings & Wallet",profile:"Profile & KYC",tickets:"Support",growth:"Growth & Insights"};
   const views={
     dashboard:<FrDashboard user={user} onNav={onNav}/>,
@@ -2986,6 +3122,7 @@ function FrProfile({ user, toast }) {
 
 // ─── SUPPORT APP ──────────────────────────────────────────────
 function SupportApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead }) {
+  usePresence(user?.id, `Support: ${view||"dashboard"}`);
   const counts=useDashCounts();
   const titles={dashboard:"Support Dashboard",tickets:"Tickets",messages:"Messages",users:"Users",reviews:"FR Reviews"};
   const views={dashboard:<SupportDashboard/>,tickets:<TicketsView user={user} toast={toast}/>,messages:<MessagesView user={user} toast={toast}/>,users:<AllUsers toast={toast}/>,reviews:<FRReviews toast={toast}/>};
@@ -3002,16 +3139,57 @@ function SupportApp({ user, view, onNav, onLogout, toast, notifs, unread, markRe
 
 function SupportDashboard() {
   const [stats, setStats] = useState(null);
-  useEffect(()=>{ Promise.all([db.get(K.T),db.get(K.U)]).then(([t,u])=>{setStats({open:(t||[]).filter(x=>x.status==="open").length,inprog:(t||[]).filter(x=>x.status==="in_progress").length,resolved:(t||[]).filter(x=>x.status==="resolved").length,users:(u||[]).length});}); },[]);
+  const [liveUsers,setLiveUsers]=useState([]);
+  useEffect(()=>{
+    Promise.all([db.get(K.T),db.get(K.U)]).then(([t,u])=>{
+      setStats({open:(t||[]).filter(x=>x.status==="open").length,inprog:(t||[]).filter(x=>x.status==="in_progress").length,resolved:(t||[]).filter(x=>x.status==="resolved").length,users:(u||[]).length});
+      const cutoff=new Date(Date.now()-3*60*1000);
+      setLiveUsers((u||[]).filter(x=>x.last_seen&&new Date(x.last_seen)>cutoff));
+    });
+  },[]);
+  // Realtime presence updates
+  useEffect(()=>{
+    const ch=supabase.channel("support-presence")
+      .on("postgres_changes",{event:"UPDATE",schema:"public",table:"profiles"},(payload)=>{
+        const p=payload.new;if(!p)return;
+        const cutoff=new Date(Date.now()-3*60*1000);
+        setLiveUsers(prev=>{
+          const upd=prev.filter(u=>u.id!==p.id&&new Date(u.last_seen||0)>cutoff);
+          if(p.last_seen&&new Date(p.last_seen)>cutoff)upd.push(p);
+          return upd;
+        });
+      }).subscribe();
+    return ()=>supabase.removeChannel(ch);
+  },[]);
   return (
     <div>
       <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Support Dashboard</h1></div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16}} className="stagger">
+      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:16,marginBottom:20}} className="stagger">
+        <Stat label="Live Now" value={liveUsers.length} icon="🟢" color="var(--g)"/>
         <Stat label="Open Tickets" value={stats?.open||"…"} icon="🔴" color="var(--err)"/>
         <Stat label="In Progress" value={stats?.inprog||"…"} icon="🟡" color="var(--warn)"/>
         <Stat label="Resolved" value={stats?.resolved||"…"} icon="🟢" color="var(--g)"/>
         <Stat label="Total Users" value={stats?.users||"…"} icon="👥" color="var(--info)"/>
       </div>
+      {liveUsers.length>0&&(
+        <Card style={{padding:16,marginBottom:20,border:"2px solid var(--gl)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+            <span style={{width:8,height:8,borderRadius:"50%",background:"var(--g)",display:"inline-block",animation:"pulse 2s ease infinite"}}/>
+            <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:14}}>Users Active Right Now ({liveUsers.length})</h3>
+          </div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+            {liveUsers.map(u=>(
+              <div key={u.id} style={{display:"flex",alignItems:"center",gap:6,padding:"6px 10px",background:"var(--surf)",borderRadius:8,border:"1px solid var(--bdr)"}}>
+                <Avatar name={u.name} online size={24}/>
+                <div>
+                  <div style={{fontSize:12,fontWeight:600}}>{u.name}</div>
+                  <div style={{fontSize:10,color:"var(--sub)"}}>{u.current_activity||"Online"}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
