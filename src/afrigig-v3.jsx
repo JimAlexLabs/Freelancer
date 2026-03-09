@@ -1557,40 +1557,53 @@ function AdminApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead
 function AdminOverview({ onNav }) {
   const [data,setData]=useState(null);
   const [liveUsers,setLiveUsers]=useState([]);
+  const [rtStatus,setRtStatus]=useState("connecting"); // "connecting" | "live" | "error"
 
-  // Initial load
+  // Helper: is a profile considered "online"
+  const isLive = u => {
+    if (u.is_online) return true; // explicitly set online
+    if (u.last_seen && new Date(u.last_seen) > new Date(Date.now()-3*60*1000)) return true;
+    return false;
+  };
+
+  // Initial + periodic poll (fallback if Realtime lags)
   useEffect(()=>{
     const load=async()=>{
       const [users,jobs,tickets,escrows]=await Promise.all([db.get(K.U),db.get(K.J),db.get(K.T),db.get(K.E)]);
       const frs=(users||[]).filter(u=>u.role==="freelancer");
       setData({frs,all:users||[],jobs:jobs||[],tickets:tickets||[],escrows:escrows||[]});
-      // Compute "live" = last_seen within last 3 minutes
-      const cutoff=new Date(Date.now()-3*60*1000);
-      setLiveUsers((users||[]).filter(u=>u.last_seen&&new Date(u.last_seen)>cutoff));
+      setLiveUsers((users||[]).filter(isLive));
     };
     load();
+    // Poll every 15s so the list stays fresh even without Realtime
+    const tid=setInterval(()=>{
+      db.get(K.U).then(users=>{
+        if(users) setLiveUsers((users).filter(isLive));
+      });
+    },15000);
+    return ()=>clearInterval(tid);
   },[]);
 
-  // Supabase Realtime: subscribe to profile presence changes
+  // Supabase Realtime: instant updates when any profile changes
   useEffect(()=>{
     const channel=supabase.channel("admin-presence")
       .on("postgres_changes",{event:"UPDATE",schema:"public",table:"profiles"},(payload)=>{
         const p=payload.new;
         if(!p) return;
         setLiveUsers(prev=>{
-          const cutoff=new Date(Date.now()-3*60*1000);
-          // Rebuild live list: update or add this user, remove stale ones
-          const updated=prev.filter(u=>u.id!==p.id&&new Date(u.last_seen||0)>cutoff);
-          if(p.last_seen&&new Date(p.last_seen)>cutoff) updated.push(p);
+          const updated=prev.filter(u=>u.id!==p.id);
+          if(isLive(p)) updated.push(p);
           return updated;
         });
-        // Also update main data stats
         setData(d=>{
           if(!d) return d;
           return {...d, all:d.all.map(u=>u.id===p.id?{...u,...p}:u), frs:d.frs.map(u=>u.id===p.id?{...u,...p}:u)};
         });
       })
-      .subscribe();
+      .subscribe((status)=>{
+        if(status==="SUBSCRIBED") setRtStatus("live");
+        else if(status==="CHANNEL_ERROR"||status==="TIMED_OUT") setRtStatus("error");
+      });
     return ()=>supabase.removeChannel(channel);
   },[]);
 
@@ -1618,7 +1631,9 @@ function AdminOverview({ onNav }) {
             <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16}}>Live on Platform</h3>
             <span style={{background:"var(--gl)",color:"var(--gd)",fontSize:11,fontWeight:800,padding:"2px 8px",borderRadius:20}}>{liveUsers.length} online</span>
           </div>
-          <span style={{fontSize:11,color:"var(--sub)"}}>Updates in real-time · active within 3 min</span>
+          <span style={{fontSize:11,color:rtStatus==="live"?"var(--gd)":rtStatus==="error"?"var(--err)":"var(--sub)",fontWeight:rtStatus==="live"?700:400}}>
+            {rtStatus==="live"?"⚡ Realtime connected":rtStatus==="error"?"⚠ Realtime error — polling every 15s":"⏳ Connecting… · polling every 15s"}
+          </span>
         </div>
         {liveUsers.length===0
           ? <div style={{color:"var(--sub)",fontSize:13,padding:"12px 0"}}>No users currently active. Presence updates automatically when users log in.</div>
@@ -3140,24 +3155,21 @@ function SupportApp({ user, view, onNav, onLogout, toast, notifs, unread, markRe
 function SupportDashboard() {
   const [stats, setStats] = useState(null);
   const [liveUsers,setLiveUsers]=useState([]);
+  const isLiveS=u=>u.is_online||(u.last_seen&&new Date(u.last_seen)>new Date(Date.now()-3*60*1000));
   useEffect(()=>{
-    Promise.all([db.get(K.T),db.get(K.U)]).then(([t,u])=>{
+    const load=()=>Promise.all([db.get(K.T),db.get(K.U)]).then(([t,u])=>{
       setStats({open:(t||[]).filter(x=>x.status==="open").length,inprog:(t||[]).filter(x=>x.status==="in_progress").length,resolved:(t||[]).filter(x=>x.status==="resolved").length,users:(u||[]).length});
-      const cutoff=new Date(Date.now()-3*60*1000);
-      setLiveUsers((u||[]).filter(x=>x.last_seen&&new Date(x.last_seen)>cutoff));
+      setLiveUsers((u||[]).filter(isLiveS));
     });
+    load();
+    const tid=setInterval(()=>db.get(K.U).then(u=>{if(u)setLiveUsers(u.filter(isLiveS));}),15000);
+    return ()=>clearInterval(tid);
   },[]);
-  // Realtime presence updates
   useEffect(()=>{
     const ch=supabase.channel("support-presence")
       .on("postgres_changes",{event:"UPDATE",schema:"public",table:"profiles"},(payload)=>{
         const p=payload.new;if(!p)return;
-        const cutoff=new Date(Date.now()-3*60*1000);
-        setLiveUsers(prev=>{
-          const upd=prev.filter(u=>u.id!==p.id&&new Date(u.last_seen||0)>cutoff);
-          if(p.last_seen&&new Date(p.last_seen)>cutoff)upd.push(p);
-          return upd;
-        });
+        setLiveUsers(prev=>{const upd=prev.filter(u=>u.id!==p.id);if(isLiveS(p))upd.push(p);return upd;});
       }).subscribe();
     return ()=>supabase.removeChannel(ch);
   },[]);
