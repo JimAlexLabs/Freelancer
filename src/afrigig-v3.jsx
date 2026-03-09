@@ -1570,7 +1570,7 @@ function NewRegistrations() {
 
 function FRReviews({ toast }) {
   const [queue,setQueue]=useState([]);const [sel,setSel]=useState(null);const [loading,setLoading]=useState(true);const [acting,setActing]=useState("");const [rejectModal,setRejectModal]=useState(false);const [reason,setReason]=useState("");const [aiResult,setAiResult]=useState(null);const [aiLoading,setAiLoading]=useState(false);
-  const load=async()=>{const us=(await db.get(K.U))||[];setQueue(us.filter(u=>u.fs==="UNDER_REVIEW").sort((a,b)=>new Date(a.assessment_submitted_at)-new Date(b.assessment_submitted_at)));setLoading(false);};
+  const load=async()=>{const us=(await db.get(K.U))||[];setQueue(us.filter(u=>["UNDER_REVIEW","ASSESSMENT_PENDING"].includes(u.fs)&&u.track).sort((a,b)=>new Date(a.assessment_submitted_at||a.created_at)-new Date(b.assessment_submitted_at||b.created_at)));setLoading(false);};
   useEffect(()=>{load();},[]);
   const selUser=sel?queue.find(u=>u.id===sel):null;
   const doAction=async action=>{
@@ -1655,9 +1655,22 @@ function FRReviews({ toast }) {
 }
 
 function AllUsers({ toast }) {
-  const [users,setUsers]=useState([]);const [search,setSearch]=useState("");const [rf,setRf]=useState("all");const [acting,setActing]=useState("");
+  const [users,setUsers]=useState([]);const [search,setSearch]=useState("");const [rf,setRf]=useState("all");const [acting,setActing]=useState("");const [syncing,setSyncing]=useState(false);
   const load=async()=>setUsers((await db.get(K.U))||[]);
   useEffect(()=>{load();},[]);
+  // Force-sync each user's profile from Supabase (reads latest profiles table after DB trigger backfill)
+  const syncAll=async()=>{
+    setSyncing(true);
+    try {
+      // Re-fetch all profiles fresh from Supabase
+      const fresh = await db.get(K.U);
+      setUsers(fresh||[]);
+      toast(`Synced ${(fresh||[]).length} profiles from database`,"success");
+    } catch(e) {
+      toast("Sync failed: "+e.message,"error");
+    }
+    setSyncing(false);
+  };
   const filtered=useMemo(()=>{let r=users;if(rf!=="all")r=r.filter(u=>u.role===rf);if(search)r=r.filter(u=>u.name.toLowerCase().includes(search.toLowerCase())||u.email.toLowerCase().includes(search.toLowerCase()));return r.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));},[users,search,rf]);
   const doAction=async(id,action)=>{
     const user=users.find(u=>u.id===id);if(!user)return;
@@ -1683,12 +1696,15 @@ function AllUsers({ toast }) {
   };
   return (
     <div>
-      <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>All Users ({users.length})</h1></div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
+        <h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>All Users ({users.length})</h1>
+        <Btn variant="outline" loading={syncing} onClick={syncAll} icon="🔄">Sync All Profiles</Btn>
+      </div>
       <Card style={{padding:"14px 20px",marginBottom:16}}><div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}><input className="inp" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search name or email…" style={{flex:1,maxWidth:280}}/>{["all","admin","support","freelancer"].map(r=><button key={r} className={`btn ${rf===r?"bp":"bg2"} bsm`} onClick={()=>setRf(r)} style={{textTransform:"capitalize"}}>{r} ({users.filter(u=>r==="all"?true:u.role===r).length})</button>)}</div></Card>
       <Card style={{padding:0,overflow:"hidden"}}><table><thead><tr><th>User</th><th>Role</th><th>FR Status</th><th>Track</th><th>Account</th><th>Joined</th><th>Actions</th></tr></thead><tbody>{filtered.map(u=>(<tr key={u.id}><td><div style={{display:"flex",alignItems:"center",gap:10}}><Avatar name={u.name} online={u.is_online} size={30}/><div><div style={{fontWeight:600}}>{u.name}</div><div style={{fontSize:12,color:"var(--sub)"}}>{u.email}</div></div></div></td><td><span className={`tag ${u.role==="admin"?"tr":u.role==="support"?"tb":"tg"}`}>{u.role}</span></td><td>{u.fs?<Bdg status={u.fs}/>:<span style={{color:"var(--sub)"}}>—</span>}</td><td>{u.track?<span>{TRACKS[u.track]?.icon} {TRACKS[u.track]?.label}</span>:<span style={{color:"var(--sub)"}}>—</span>}</td><td><Bdg status={u.status}/></td><td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(u.created_at)}</td>
         <td>
           <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
-            {u.role==="freelancer"&&u.fs==="UNDER_REVIEW"&&<Btn variant="primary" size="sm" loading={acting===`${u.id}:approve`} onClick={()=>doAction(u.id,"approve")}>✓ Approve</Btn>}
+            {u.role==="freelancer"&&["UNDER_REVIEW","ASSESSMENT_PENDING","ASSESSMENT_SUBMITTED"].includes(u.fs)&&<Btn variant="primary" size="sm" loading={acting===`${u.id}:approve`} onClick={()=>doAction(u.id,"approve")}>✓ Approve</Btn>}
             {u.role!=="admin"&&u.status!=="suspended"&&u.status!=="banned"&&<Btn variant="ghost" size="sm" loading={acting===`${u.id}:suspend`} onClick={()=>doAction(u.id,"suspend")}>⏸ Suspend</Btn>}
             {u.status==="suspended"&&<Btn variant="outline" size="sm" loading={acting===`${u.id}:restore`} onClick={()=>doAction(u.id,"restore")}>↩ Restore</Btn>}
             {u.role!=="admin"&&u.status!=="banned"&&<Btn variant="danger" size="sm" loading={acting===`${u.id}:ban`} onClick={()=>{if(window.confirm(`Permanently terminate ${u.name}? This cannot be undone.`))doAction(u.id,"ban");}}>⛔ Terminate</Btn>}

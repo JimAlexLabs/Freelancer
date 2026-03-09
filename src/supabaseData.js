@@ -434,8 +434,13 @@ export const db = {
       if (k === K.U) {
         const payload = toProfileUpdate(upd);
         const { error } = await supabase.from("profiles").update(payload).eq("id", id);
-        if (error) throw error;
-        const { data } = await supabase.from("profiles").select("*").eq("id", id).single();
+        if (error) {
+          console.warn("[supabaseData] profiles update failed, retrying upsert:", error.message);
+          // Retry with upsert in case the row doesn't exist yet
+          const { error: upsertError } = await supabase.from("profiles").upsert({ id, ...payload }, { onConflict: "id" });
+          if (upsertError) throw upsertError;
+        }
+        const { data } = await supabase.from("profiles").select("*").eq("id", id).maybeSingle();
         return data ? toAppUser(data) : null;
       }
       if (k === K.J) {
