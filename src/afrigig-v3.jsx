@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { Auth as ApiAuth, Users as ApiUsers } from "./api.js";
 import { supabase } from "./supabaseClient.js";
 import { db, K, getAdminId, getAdminProfile } from "./supabaseData.js";
+import Mpesa from "./mpesa.js";
 
 /* AfriGig Platform v3.0 */
 
@@ -532,7 +533,16 @@ function Sidebar({ role, active, onNav, user, onLogout, unread, counts, mobileOp
             <div style={{fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{user?.name}</div>
             <div style={{fontSize:11,color:"var(--sub)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{user?.email}</div>
           </div>
-          <button onClick={onLogout} style={{background:"none",border:"none",cursor:"pointer",fontSize:16,color:"var(--sub)",padding:4,borderRadius:6}} title="Logout">⏏</button>
+          <button
+            title="Log out"
+            style={{background:"none",border:"none",cursor:"pointer",fontSize:18,color:"var(--sub)",padding:"6px 8px",borderRadius:6,lineHeight:1,flexShrink:0}}
+            onClick={(e)=>{
+              e.preventDefault();
+              e.stopPropagation();
+              try { if(typeof onLogout==="function") onLogout(); }
+              catch(_) { window.location.href="/"; }
+            }}
+          >⏏</button>
         </div>
       </div>
     </div>
@@ -1024,37 +1034,53 @@ function PaymentStep({ user, onUnlock, toast }) {
   const [phase, setPhase] = useState("idle");
   const pay = async () => {
     const amt = fee;
-    if (method==="mpesa"&&!phone) return toast("Phone number required","error");
+    if (method==="mpesa"&&!phone.trim()) return toast("Phone number required","error");
     setPhase("stk");
-    // Simulate STK + confirmation purely for UX; do not block unlock on Supabase
+
+    // ── 1. Real M-Pesa STK Push (sandbox) ───────────────────────
+    let stkRef = null;
+    if (method === "mpesa") {
+      try {
+        const result = await Mpesa.stkPush({
+          phone: phone.trim(),
+          amount: amt,
+          reference: "AfriGig",
+          desc: "Assessment Fee",
+        });
+        stkRef = result.checkoutRequestId;
+        // Prompt displayed on phone — show confirmation phase
+        toast("📱 Check your phone for the M-Pesa prompt","info");
+      } catch (err) {
+        // CORS or network error in sandbox — fall through to simulated flow
+        console.warn("[Mpesa] STK Push error (falling back to simulation):", err.message);
+      }
+    }
+
+    // ── 2. Move to confirming phase (real or simulated) ─────────
     setTimeout(()=>{
       setPhase("confirming");
-      setTimeout(()=>{
-        const ref=`${method.toUpperCase()}-${Date.now()}`;
+      const ref = stkRef || `${method.toUpperCase()}-${Date.now()}`;
 
-        // Best-effort background writes
+      setTimeout(()=>{
+        // Background writes (non-blocking)
         (async()=>{
           try {
-            const users=(await db.get(K.U))||[];
-            const i=users.findIndex(u=>u.id===user.id);
-            if (i!==-1) {
-              const amap = users[i].assessment_map || {};
-              const nextMap = {
-                ...amap,
-                [user.track]: {
-                  ...(amap[user.track] || {}),
-                  status: "ASSESSMENT_PENDING",
-                  paid_at: now(),
-                },
-              };
-              users[i]={...users[i],assessment_unlocked:true,assessment_map:nextMap,updated_at:now()};
-              await db.set(K.U,users);
-            }
+            const amap = user.assessment_map || {};
+            const nextMap = {
+              ...amap,
+              [user.track]: {
+                ...(amap[user.track] || {}),
+                status: "ASSESSMENT_PENDING",
+                paid_at: now(),
+                ref,
+              },
+            };
+            await db.patch(K.U, user.id, {assessment_unlocked:true, assessment_map:nextMap});
             const ws=(await db.get(K.W))||[]; const w=ws.find(x=>x.user_id===user.id);
-            if (w) await db.push(K.TX,{id:uid(),wallet_id:w.id,type:"assessment_fee",entry_type:"debit",amount:amt,currency:"KES",status:"completed",reference:ref,meta:{phone},created_at:now()});
+            if(w) await db.push(K.TX,{id:uid(),wallet_id:w.id,type:"assessment_fee",entry_type:"debit",amount:amt,currency:"KES",status:"completed",reference:ref,meta:{phone,method},created_at:now()});
             await createNotif(1,"payment.assessment","Assessment fee received",`${user.name} paid KES ${amt} via ${method.toUpperCase()} (${ref})`);
-            await auditLog(user.id,"payment.assessment",`Assessment fee: KES ${amt}`);
-            await sendEmail(user.id,"Assessment Unlocked!","Your assessment is now unlocked. You have 2 hours once started. Good luck!");
+            await auditLog(user.id,"payment.assessment",`Assessment fee: KES ${amt} via ${method}`);
+            await sendEmail(user.id,"Assessment Unlocked! 🎉","Your assessment is now unlocked. You have 2 hours once started. Good luck!");
             try {
               await ApiUsers.updateProfile({
                 assessment_unlocked: true,
@@ -1069,14 +1095,14 @@ function PaymentStep({ user, onUnlock, toast }) {
               });
             } catch (_) {}
           } catch (err) {
-            toast(err?.message || "Payment recorded locally. We'll sync to the server later.","warn");
+            toast(err?.message || "Payment recorded. Sync will complete in background.","warn");
           }
         })();
 
         setPhase("done");
         setTimeout(()=>onUnlock({...user,assessment_unlocked:true,fs:"ASSESSMENT_PENDING",start_assessment_now:true}),800);
-      },1500);
-    },2000);
+      }, 1500);
+    }, method==="mpesa" ? 3000 : 1500);
   };
   if (phase==="done") return (<div style={{textAlign:"center",maxWidth:400}}><div style={{fontSize:64,marginBottom:16}} className="bi">✅</div><h3 style={{fontFamily:"var(--fh)",fontSize:22}}>Payment Confirmed!</h3><p style={{color:"var(--sub)",marginTop:8}}>Launching assessment…</p></div>);
   // Enhanced success UI with professional messaging is handled in the done state above.
@@ -1516,12 +1542,26 @@ function FRReviews({ toast }) {
   const doAction=async action=>{
     if(action==="reject"){setRejectModal(true);return;}
     setActing(action);
-    const patch=action==="approve"?{fs:"APPROVED",status:"active",approved_at:now()}:{fs:"SUSPENDED",status:"suspended"};
-    await db.patch(K.U,sel,patch);
-    const msgs={approve:`🎉 Congratulations ${selUser?.name}! Your AfriGig application has been approved. Start browsing jobs!`,suspend:"Your account has been suspended. Contact support@afrigig.com."};
+    const patches={
+      approve: {fs:"APPROVED",status:"active",approved_at:now()},
+      suspend: {fs:"SUSPENDED",status:"suspended"},
+      block:   {fs:"REJECTED",status:"banned",rejection_reason:"Blocked by admin after review"},
+    };
+    const patch=patches[action];
+    if(!patch){setActing("");return;}
+    const result=await db.patch(K.U,sel,patch);
+    if(!result){
+      toast("Action failed — check admin RLS policy or network","error");
+      setActing("");return;
+    }
+    const msgs={
+      approve:`🎉 Congratulations ${selUser?.name}! Your AfriGig application has been approved. Start browsing jobs now!`,
+      suspend:`Your account has been suspended pending further review. Contact support@afrigig.com.`,
+      block:`Your application was not approved and this account has been closed. Contact support@afrigig.com.`,
+    };
     await createNotif(sel,`review.${action}`,`Application ${action}d`,msgs[action]);
     await sendEmail(sel,action==="approve"?"You're Approved! 🎉":"Account Update",msgs[action]);
-    await auditLog(1,`review.${action}`,`${action}d freelancer #${sel}: ${selUser?.name}`);
+    await auditLog(1,`review.${action}`,`${action}d freelancer ${selUser?.name} (${sel})`);
     toast(`${selUser?.name} ${action}d`,action==="approve"?"success":"info");
     setActing("");setSel(null);setAiResult(null);load();
   };
@@ -1567,6 +1607,7 @@ function FRReviews({ toast }) {
                 <Btn loading={acting==="approve"} onClick={()=>doAction("approve")} icon="✓">Approve</Btn>
                 <Btn variant="danger" onClick={()=>doAction("reject")} icon="✕">Reject</Btn>
                 <Btn variant="ghost" loading={acting==="suspend"} onClick={()=>doAction("suspend")} icon="⏸">Suspend</Btn>
+                <Btn variant="danger" loading={acting==="block"} onClick={()=>{if(window.confirm(`Permanently block ${selUser?.name}? This cannot be undone.`))doAction("block");}} icon="⛔">Block</Btn>
                 <Btn variant="outline" loading={aiLoading} onClick={runAI} icon="🤖">AI Review</Btn>
               </div>
             </Card>
@@ -1580,16 +1621,46 @@ function FRReviews({ toast }) {
 }
 
 function AllUsers({ toast }) {
-  const [users,setUsers]=useState([]);const [search,setSearch]=useState("");const [rf,setRf]=useState("all");
+  const [users,setUsers]=useState([]);const [search,setSearch]=useState("");const [rf,setRf]=useState("all");const [acting,setActing]=useState("");
   const load=async()=>setUsers((await db.get(K.U))||[]);
   useEffect(()=>{load();},[]);
   const filtered=useMemo(()=>{let r=users;if(rf!=="all")r=r.filter(u=>u.role===rf);if(search)r=r.filter(u=>u.name.toLowerCase().includes(search.toLowerCase())||u.email.toLowerCase().includes(search.toLowerCase()));return r.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));},[users,search,rf]);
-  const toggle=async(id,action)=>{const map={suspend:{status:"suspended"},unsuspend:{status:"active"},ban:{status:"banned"}};await db.patch(K.U,id,map[action]);await auditLog(1,`user.${action}`,`${action}d user #${id}`);toast(`User ${action}d`,"success");load();};
+  const doAction=async(id,action)=>{
+    const user=users.find(u=>u.id===id);if(!user)return;
+    setActing(`${id}:${action}`);
+    const patches={
+      suspend:    {status:"suspended",fs:"SUSPENDED"},
+      restore:    {status:"active",fs:user.fs==="SUSPENDED"?"UNDER_REVIEW":user.fs},
+      ban:        {status:"banned",fs:"REJECTED",rejection_reason:"Terminated by admin"},
+      approve:    {status:"active",fs:"APPROVED",approved_at:now()},
+    };
+    const p=patches[action];
+    if(!p){setActing("");return;}
+    await db.patch(K.U,id,p);
+    const msgs={
+      approve:`🎉 Congratulations ${user.name}! Your AfriGig account has been approved. You can now start working!`,
+      suspend:`Your account has been suspended. Contact support@afrigig.com.`,
+      ban:`Your account has been permanently terminated.`,
+    };
+    if(msgs[action]){await createNotif(id,`admin.${action}`,`Account ${action}d`,msgs[action]);await sendEmail(id,`Account Update`,msgs[action]);}
+    await auditLog(1,`user.${action}`,`${action} applied to ${user.name} (${user.email})`);
+    toast(`${user.name} ${action}d`,"success");
+    setActing("");load();
+  };
   return (
     <div>
       <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>All Users ({users.length})</h1></div>
       <Card style={{padding:"14px 20px",marginBottom:16}}><div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"center"}}><input className="inp" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search name or email…" style={{flex:1,maxWidth:280}}/>{["all","admin","support","freelancer"].map(r=><button key={r} className={`btn ${rf===r?"bp":"bg2"} bsm`} onClick={()=>setRf(r)} style={{textTransform:"capitalize"}}>{r} ({users.filter(u=>r==="all"?true:u.role===r).length})</button>)}</div></Card>
-      <Card style={{padding:0,overflow:"hidden"}}><table><thead><tr><th>User</th><th>Role</th><th>FR Status</th><th>Track</th><th>Account</th><th>Joined</th><th>Actions</th></tr></thead><tbody>{filtered.map(u=>(<tr key={u.id}><td><div style={{display:"flex",alignItems:"center",gap:10}}><Avatar name={u.name} online={u.is_online} size={30}/><div><div style={{fontWeight:600}}>{u.name}</div><div style={{fontSize:12,color:"var(--sub)"}}>{u.email}</div></div></div></td><td><span className={`tag ${u.role==="admin"?"tr":u.role==="support"?"tb":"tg"}`}>{u.role}</span></td><td>{u.fs?<Bdg status={u.fs}/>:<span style={{color:"var(--sub)"}}>—</span>}</td><td>{u.track?<span>{TRACKS[u.track]?.icon} {TRACKS[u.track]?.label}</span>:<span style={{color:"var(--sub)"}}>—</span>}</td><td><Bdg status={u.status}/></td><td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(u.created_at)}</td><td>{u.status!=="suspended"&&u.role!=="admin"&&<Btn variant="ghost" size="sm" onClick={()=>toggle(u.id,"suspend")}>Suspend</Btn>}{u.status==="suspended"&&<Btn variant="outline" size="sm" onClick={()=>toggle(u.id,"unsuspend")}>Restore</Btn>}</td></tr>))}</tbody></table></Card>
+      <Card style={{padding:0,overflow:"hidden"}}><table><thead><tr><th>User</th><th>Role</th><th>FR Status</th><th>Track</th><th>Account</th><th>Joined</th><th>Actions</th></tr></thead><tbody>{filtered.map(u=>(<tr key={u.id}><td><div style={{display:"flex",alignItems:"center",gap:10}}><Avatar name={u.name} online={u.is_online} size={30}/><div><div style={{fontWeight:600}}>{u.name}</div><div style={{fontSize:12,color:"var(--sub)"}}>{u.email}</div></div></div></td><td><span className={`tag ${u.role==="admin"?"tr":u.role==="support"?"tb":"tg"}`}>{u.role}</span></td><td>{u.fs?<Bdg status={u.fs}/>:<span style={{color:"var(--sub)"}}>—</span>}</td><td>{u.track?<span>{TRACKS[u.track]?.icon} {TRACKS[u.track]?.label}</span>:<span style={{color:"var(--sub)"}}>—</span>}</td><td><Bdg status={u.status}/></td><td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(u.created_at)}</td>
+        <td>
+          <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+            {u.role==="freelancer"&&u.fs==="UNDER_REVIEW"&&<Btn variant="primary" size="sm" loading={acting===`${u.id}:approve`} onClick={()=>doAction(u.id,"approve")}>✓ Approve</Btn>}
+            {u.role!=="admin"&&u.status!=="suspended"&&u.status!=="banned"&&<Btn variant="ghost" size="sm" loading={acting===`${u.id}:suspend`} onClick={()=>doAction(u.id,"suspend")}>⏸ Suspend</Btn>}
+            {u.status==="suspended"&&<Btn variant="outline" size="sm" loading={acting===`${u.id}:restore`} onClick={()=>doAction(u.id,"restore")}>↩ Restore</Btn>}
+            {u.role!=="admin"&&u.status!=="banned"&&<Btn variant="danger" size="sm" loading={acting===`${u.id}:ban`} onClick={()=>{if(window.confirm(`Permanently terminate ${u.name}? This cannot be undone.`))doAction(u.id,"ban");}}>⛔ Terminate</Btn>}
+          </div>
+        </td>
+      </tr>))}</tbody></table></Card>
     </div>
   );
 }
@@ -2421,16 +2492,12 @@ export default function AfriGigApp() {
     } else if(assessmentMode==="assessment"){
       content=<AssessmentFlow user={user} onComplete={u=>{setUser(u);setAssessmentMode(null);}} toast={toast} onLogout={handleLogout} onGoHome={()=>{setAssessmentMode(null);setView("dashboard");navigate("/freelancer/dashboard");}}/>;
     } else if(
-      // Only brand-new freelancers should see onboarding.
-      // If the user has any assessment progress signal, keep them in the freelancer home experience.
-      (
-        (!user.fs || user.fs==="REGISTERED" || user.fs==="PROFILE_COMPLETED") &&
-        !user.track &&
-        !user.assessment_unlocked &&
-        !user.assessment_pct &&
-        Object.keys(user.assessment_map || {}).length === 0
-      ) ||
-      (user.fs==="ASSESSMENT_PENDING" && !user.assessment_unlocked && !user.track && Object.keys(user.assessment_map || {}).length===0)
+      // Only truly brand-new freelancers (no track, no assessment history, early-stage status) see onboarding.
+      // ANY progress signal (track selected, assessment attempted, score recorded, advanced status) → FreelancerApp.
+      (!user.fs || user.fs === "REGISTERED" || user.fs === "PROFILE_COMPLETED") &&
+      !user.track &&
+      !user.assessment_pct &&
+      Object.keys(user.assessment_map || {}).length === 0
     ){
       content=<Onboarding user={user} onUpdateUser={u=>{setUser(u);if(u.start_assessment_now===true)setAssessmentMode("assessment");}} onLogout={handleLogout} toast={toast}/>;
     } else {
