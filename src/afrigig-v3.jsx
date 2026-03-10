@@ -77,7 +77,17 @@ tr:last-child td{border-bottom:none}tbody tr:hover td{background:var(--surf)}
 
 const uid = () => Date.now() + Math.floor(Math.random() * 99999);
 const now = () => new Date().toISOString();
-const fmtDate = d => new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+const fmtDate = d => {
+  const dt = d ? new Date(d) : null;
+  if (!dt || Number.isNaN(dt.getTime())) return "—";
+  return dt.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+};
+const deriveAssessmentPct = (u) => {
+  if (u?.assessment_pct !== null && u?.assessment_pct !== undefined) return Number(u.assessment_pct);
+  const amap = u?.assessment_map || {};
+  const vals = Object.values(amap).map(v => Number(v?.score ?? v?.pct)).filter(n => Number.isFinite(n));
+  return vals.length ? Math.max(...vals) : null;
+};
 const fmtRel = d => { const m = Math.floor((Date.now() - new Date(d)) / 60000); if (m < 1) return "Just now"; if (m < 60) return `${m}m ago`; if (m < 1440) return `${Math.floor(m / 60)}h ago`; return fmtDate(d); };
 const fmtKES = n => `KES ${Number(n || 0).toLocaleString("en-KE", { minimumFractionDigits: 2 })}`;
 const initials = n => (n || "?").split(" ").map(w => w[0]).join("").toUpperCase().slice(0, 2);
@@ -173,7 +183,6 @@ const MARKET_RATES = {
 // ── Normalize Supabase user → frontend shape ─────────────────
 function normalizeUser(supabaseUser) {
   if (!supabaseUser) return null;
-  // Supabase stores extra fields in user_metadata
   const m = supabaseUser.user_metadata || {};
   return {
     id:                  supabaseUser.id,
@@ -195,6 +204,14 @@ function normalizeUser(supabaseUser) {
     review_deadline:     m.review_deadline ?? null,
     is_online:           m.is_online ?? false,
     assessment_map:      m.assessment_map || {},
+    phone_number:        m.phone_number || null,
+    kyc_id_uploaded:     m.kyc_id_uploaded ?? false,
+    kyc_selfie_done:     m.kyc_selfie_done ?? false,
+    kyc_phone_verified:  m.kyc_phone_verified ?? false,
+    approved_at:         m.approved_at || null,
+    video_intro_url:     m.video_intro_url || null,
+    skill_showcase_json: m.skill_showcase_json || null,
+    created_at:          supabaseUser.created_at || null,
   };
 }
 
@@ -530,10 +547,14 @@ const NAV_ITEMS = {
   ],
   support:[
     {key:"dashboard",icon:"⬡",label:"Dashboard"},
+    {key:"registrations",icon:"🆕",label:"New Registrations",badge:"new"},
+    {key:"reviews",icon:"🔍",label:"FR Reviews"},
+    {key:"users",icon:"👥",label:"Users"},
+    {key:"jobs",icon:"💼",label:"Jobs"},
+    {key:"payments",icon:"💳",label:"Payments"},
     {key:"tickets",icon:"🎫",label:"Tickets",badge:"tickets"},
     {key:"messages",icon:"💬",label:"Messages"},
-    {key:"users",icon:"👥",label:"Users"},
-    {key:"reviews",icon:"🔍",label:"FR Reviews"},
+    {key:"reports",icon:"📊",label:"Analytics"},
   ],
   freelancer:[
     {key:"dashboard",icon:"⬡",label:"Dashboard"},
@@ -978,13 +999,14 @@ function ProfileStep({ user, onSave, toast }) {
     timezone:        "Africa/Nairobi",
     bio:             user.bio || "",
     portfolio_links: user.portfolio_links || "",
+    phone_number:    user.phone_number || "",
   });
   const [cvFile, setCvFile] = useState(null);
   const [loading, setLoading] = useState(false);
 
   const save = () => {
-    if (!form.skills || !form.experience || !form.country) {
-      return toast("Skills, experience and country are required","error");
+    if (!form.skills || !form.experience || !form.country || !form.phone_number) {
+      return toast("Skills, experience, country and phone are required","error");
     }
     setLoading(true);
     // Build local user object immediately
@@ -996,6 +1018,8 @@ function ProfileStep({ user, onSave, toast }) {
       bio:             form.bio,
       portfolio_links: form.portfolio_links,
       country:         form.country,
+      phone_number:    form.phone_number,
+      kyc_phone_verified: true,
       fs:              "PROFILE_COMPLETED",
     };
 
@@ -1009,10 +1033,22 @@ function ProfileStep({ user, onSave, toast }) {
         bio:             form.bio,
         portfolio_links: form.portfolio_links ? [form.portfolio_links] : [],
         country:         form.country,
+        phone_number:    form.phone_number,
+        kyc_phone_verified: true,
       }).catch(err => {
         toast(err?.message || "Profile saved locally. We'll sync to the server later.","warn");
       });
-      db.patch(K.U, user.id, { fs: "PROFILE_COMPLETED" }).catch(() => {});
+      db.patch(K.U, user.id, {
+        fs: "PROFILE_COMPLETED",
+        skills: form.skills,
+        experience: form.experience,
+        availability: form.availability,
+        bio: form.bio,
+        portfolio_links: form.portfolio_links,
+        country: form.country,
+        phone_number: form.phone_number,
+        kyc_phone_verified: true,
+      }).catch(() => {});
     } catch (_) {
       // ignore – UI already advanced
     }
@@ -1030,6 +1066,7 @@ function ProfileStep({ user, onSave, toast }) {
           <div style={{gridColumn:"1/-1"}}><Inp label="Skills" value={form.skills} onChange={v=>setForm({...form,skills:v})} placeholder="React, Node.js, TypeScript, Python…" required hint="Comma-separated"/></div>
           <div style={{gridColumn:"1/-1"}}><Inp label="Experience Summary" value={form.experience} onChange={v=>setForm({...form,experience:v})} placeholder="5 years full-stack development…" required rows={3}/></div>
           <Inp label="Country" value={form.country} onChange={v=>setForm({...form,country:v})} placeholder="Kenya" required/>
+          <Inp label="Mobile Number (M-Pesa)" value={form.phone_number} onChange={v=>setForm({...form,phone_number:v})} placeholder="2547XXXXXXXX" required hint="Used for payouts and wallet verification"/>
           <Sel label="Availability" value={form.availability} onChange={v=>setForm({...form,availability:v})} options={["Full-time","Part-time","Weekends only","Project-based"]}/>
           <div style={{gridColumn:"1/-1"}}><Inp label="Bio" value={form.bio} onChange={v=>setForm({...form,bio:v})} placeholder="A brief professional bio…" rows={3}/></div>
           <div style={{gridColumn:"1/-1"}}><Inp label="Portfolio / GitHub URL" value={form.portfolio_links} onChange={v=>setForm({...form,portfolio_links:v})} placeholder="https://your-portfolio.com"/></div>
@@ -1308,6 +1345,8 @@ function AssessmentFlow({ user, onComplete, toast, onLogout, onGoHome }) {
       }
     })();
 
+    // Persist flag so this user never gets sent back to onboarding on future logins
+    try { localStorage.setItem(`ag3_past_ob_${user.id}`, "1"); } catch(_) {}
     onComplete({...user,fs:"UNDER_REVIEW",assessment_pct:pct,queue_pos:inReview+1,assessment_map:nextAssessmentMap});
   },[coreAns,techAns,runResults,sqlAns,user,track,techQs,hasCoding,hasSql]);
 
@@ -1569,9 +1608,9 @@ function AdminOverview({ onNav }) {
   // Initial + periodic poll (fallback if Realtime lags)
   useEffect(()=>{
     const load=async()=>{
-      const [users,jobs,tickets,escrows]=await Promise.all([db.get(K.U),db.get(K.J),db.get(K.T),db.get(K.E)]);
+      const [users,jobs,tickets,escrows,txns]=await Promise.all([db.get(K.U),db.get(K.J),db.get(K.T),db.get(K.E),db.get(K.TX)]);
       const frs=(users||[]).filter(u=>u.role==="freelancer");
-      setData({frs,all:users||[],jobs:jobs||[],tickets:tickets||[],escrows:escrows||[]});
+      setData({frs,all:users||[],jobs:jobs||[],tickets:tickets||[],escrows:escrows||[],txns:txns||[]});
       setLiveUsers((users||[]).filter(isLive));
     };
     load();
@@ -1615,12 +1654,13 @@ function AdminOverview({ onNav }) {
       <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Admin Dashboard</h1><p style={{color:"var(--sub)",marginTop:4}}>Live platform overview.</p></div>
 
       {/* Stats row */}
-      <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:16,marginBottom:24}} className="stagger">
+      <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:16,marginBottom:24}} className="stagger">
         <Stat label="Live Now" value={liveUsers.length} icon="🟢" color="var(--g)"/>
         <Stat label="Under Review" value={data?data.frs.filter(u=>u.fs==="UNDER_REVIEW").length:"…"} icon="🔍" color="var(--pur)" loading={!data}/>
         <Stat label="New Registrations" value={data?data.frs.filter(u=>["REGISTERED","PROFILE_COMPLETED"].includes(u.fs)).length:"…"} icon="🆕" color="var(--info)" loading={!data}/>
         <Stat label="Approved Freelancers" value={data?data.frs.filter(u=>u.fs==="APPROVED").length:"…"} icon="✅" color="var(--g)" loading={!data}/>
         <Stat label="Escrow Held" value={data?fmtKES(data.escrows.filter(e=>e.status==="holding").reduce((s,e)=>s+e.amount,0)):"…"} icon="🔒" color="var(--warn)" loading={!data}/>
+        <Stat label="Assessment Payments" value={data?data.txns.filter(t=>t.type==="assessment_fee").length:"…"} icon="🧪" color="var(--pur)" loading={!data}/>
       </div>
 
       {/* Live Users panel */}
@@ -1674,7 +1714,7 @@ function AdminOverview({ onNav }) {
 
 function NewRegistrations() {
   const [users,setUsers]=useState([]);const [filter,setFilter]=useState("all");const [search,setSearch]=useState("");const [loading,setLoading]=useState(true);
-  const load=()=>db.get(K.U).then(u=>{setUsers((u||[]).filter(x=>x.role==="freelancer"));setLoading(false);});
+  const load=()=>db.get(K.U).then(u=>{setUsers((u||[]).filter(x=>x.role==="freelancer").map(x=>({...x,assessment_pct:deriveAssessmentPct(x)})));setLoading(false);});
   useEffect(()=>{load();const t=setInterval(load,5000);return()=>clearInterval(t);},[]);
   const filtered=useMemo(()=>{let r=users;if(filter==="new")r=r.filter(u=>["REGISTERED","PROFILE_COMPLETED"].includes(u.fs));else if(filter==="assessment")r=r.filter(u=>u.fs==="ASSESSMENT_PENDING");else if(filter==="review")r=r.filter(u=>u.fs==="UNDER_REVIEW");else if(filter==="approved")r=r.filter(u=>u.fs==="APPROVED");else if(filter==="rejected")r=r.filter(u=>["REJECTED","SUSPENDED"].includes(u.fs));if(search)r=r.filter(u=>u.name.toLowerCase().includes(search.toLowerCase())||u.email.toLowerCase().includes(search.toLowerCase()));return r.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));},[users,filter,search]);
   const cnt=k=>{if(k==="all")return users.length;if(k==="new")return users.filter(u=>["REGISTERED","PROFILE_COMPLETED"].includes(u.fs)).length;if(k==="assessment")return users.filter(u=>u.fs==="ASSESSMENT_PENDING").length;if(k==="review")return users.filter(u=>u.fs==="UNDER_REVIEW").length;if(k==="approved")return users.filter(u=>u.fs==="APPROVED").length;return users.filter(u=>["REJECTED","SUSPENDED"].includes(u.fs)).length;};
@@ -1682,14 +1722,14 @@ function NewRegistrations() {
     <div>
       <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Freelancer Registrations</h1></div>
       <Card style={{padding:"14px 20px",marginBottom:16}}><div style={{display:"flex",gap:12,flexWrap:"wrap",alignItems:"center"}}><input className="inp" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search…" style={{maxWidth:260,flex:1}}/>{[["all","All"],["new","New"],["assessment","Assessment"],["review","Under Review"],["approved","Approved"],["rejected","Rejected"]].map(([k,l])=><button key={k} className={`btn ${filter===k?"bp":"bg2"} bsm`} onClick={()=>setFilter(k)}>{l} ({cnt(k)})</button>)}</div></Card>
-      {loading?<Card style={{padding:40}}><Spinner/></Card>:<Card style={{padding:0,overflow:"hidden"}}>{filtered.length===0?<Empty icon="📭" title="No results" sub="Try a different filter"/>:<table><thead><tr><th>Freelancer</th><th>Track</th><th>Status</th><th>Score</th><th>Country</th><th>Registered</th></tr></thead><tbody>{filtered.map(u=>(<tr key={u.id}><td><div style={{display:"flex",alignItems:"center",gap:10}}><Avatar name={u.name} online={u.is_online} size={32}/><div><div style={{fontWeight:600}}>{u.name}</div><div style={{fontSize:12,color:"var(--sub)"}}>{u.email}</div></div></div></td><td>{u.track?<span className="tag tg">{TRACKS[u.track]?.icon} {TRACKS[u.track]?.label}</span>:<span style={{color:"var(--sub)",fontSize:13}}>—</span>}</td><td><Bdg status={u.fs}/></td><td style={{fontFamily:"var(--fh)",fontWeight:700,color:u.assessment_pct>=60?"var(--gd)":u.assessment_pct?"var(--err)":"var(--sub)"}}>{u.assessment_pct!==undefined?`${u.assessment_pct}%`:"—"}</td><td style={{color:"var(--sub)"}}>{u.country||"—"}</td><td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(u.created_at)}</td></tr>))}</tbody></table>}</Card>}
+      {loading?<Card style={{padding:40}}><Spinner/></Card>:<Card style={{padding:0,overflow:"hidden"}}>{filtered.length===0?<Empty icon="📭" title="No results" sub="Try a different filter"/>:<table><thead><tr><th>Freelancer</th><th>Track</th><th>Status</th><th>Score</th><th>Country</th><th>Registered</th></tr></thead><tbody>{filtered.map(u=>(<tr key={u.id}><td><div style={{display:"flex",alignItems:"center",gap:10}}><Avatar name={u.name} online={u.is_online} size={32}/><div><div style={{fontWeight:600}}>{u.name}</div><div style={{fontSize:12,color:"var(--sub)"}}>{u.email}</div></div></div></td><td>{u.track?<span className="tag tg">{TRACKS[u.track]?.icon} {TRACKS[u.track]?.label}</span>:<span style={{color:"var(--sub)",fontSize:13}}>—</span>}</td><td><Bdg status={u.fs}/></td><td style={{fontFamily:"var(--fh)",fontWeight:700,color:u.assessment_pct>=60?"var(--gd)":u.assessment_pct?"var(--err)":"var(--sub)"}}>{u.assessment_pct!==null&&u.assessment_pct!==undefined?`${u.assessment_pct}%`:"—"}</td><td style={{color:"var(--sub)"}}>{u.country||"—"}</td><td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(u.created_at)}</td></tr>))}</tbody></table>}</Card>}
     </div>
   );
 }
 
 function FRReviews({ toast }) {
   const [queue,setQueue]=useState([]);const [sel,setSel]=useState(null);const [loading,setLoading]=useState(true);const [acting,setActing]=useState("");const [rejectModal,setRejectModal]=useState(false);const [reason,setReason]=useState("");const [aiResult,setAiResult]=useState(null);const [aiLoading,setAiLoading]=useState(false);
-  const load=async()=>{const us=(await db.get(K.U))||[];setQueue(us.filter(u=>["UNDER_REVIEW","ASSESSMENT_PENDING"].includes(u.fs)&&u.track).sort((a,b)=>new Date(a.assessment_submitted_at||a.created_at)-new Date(b.assessment_submitted_at||b.created_at)));setLoading(false);};
+  const load=async()=>{const us=((await db.get(K.U))||[]).map(u=>({...u,assessment_pct:deriveAssessmentPct(u)}));setQueue(us.filter(u=>["UNDER_REVIEW","ASSESSMENT_PENDING"].includes(u.fs)&&u.track).sort((a,b)=>new Date(a.assessment_submitted_at||a.created_at)-new Date(b.assessment_submitted_at||b.created_at)));setLoading(false);};
   useEffect(()=>{load();},[]);
   const selUser=sel?queue.find(u=>u.id===sel):null;
   const doAction=async action=>{
@@ -1819,6 +1859,7 @@ function frStatusLabel(u){
 function AllUsers({ toast }) {
   const [users,setUsers]=useState([]);const [search,setSearch]=useState("");const [rf,setRf]=useState("all");const [acting,setActing]=useState("");const [syncing,setSyncing]=useState(false);
   const [editUser,setEditUser]=useState(null);// user being edited in modal
+  const [viewUser,setViewUser]=useState(null);
   const [editForm,setEditForm]=useState({track:"",fs:"",note:""});
   const [saving,setSaving]=useState(false);
 
@@ -1882,6 +1923,28 @@ function AllUsers({ toast }) {
 
   return (
     <div>
+      {viewUser&&(
+        <div className="overlay" onClick={()=>setViewUser(null)}>
+          <div className="modal" style={{maxWidth:860,padding:30}} onClick={e=>e.stopPropagation()}>
+            <h3 style={{fontFamily:"var(--fh)",fontSize:22,fontWeight:800,marginBottom:8}}>{viewUser.name} — Full Freelancer Profile</h3>
+            <div style={{color:"var(--sub)",fontSize:13,marginBottom:18}}>{viewUser.email} · ID: {viewUser.id}</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+              {[["Status",viewUser.fs||"REGISTERED"],["Track",viewUser.track?`${TRACKS[viewUser.track]?.icon} ${TRACKS[viewUser.track]?.label}`:"Not selected"],["Assessment Score",deriveAssessmentPct(viewUser)!==null?`${deriveAssessmentPct(viewUser)}%`:"Not taken"],["Member since",fmtDate(viewUser.created_at)],["Phone",viewUser.phone_number||"Not set"],["Country",viewUser.country||"—"],["Skills",viewUser.skills||"—"],["Experience",viewUser.experience||"—"],["Availability",viewUser.availability||"—"],["Portfolio",viewUser.portfolio_links||"—"],["Bio",viewUser.bio||"—"],["Assessment Submitted",fmtDate(viewUser.assessment_submitted_at)]].map(([l,v])=><div key={l} style={{padding:"10px 12px",background:"var(--surf)",borderRadius:8}}><div style={{fontSize:11,color:"var(--sub)",textTransform:"uppercase",marginBottom:3}}>{l}</div><div style={{fontSize:13.5,fontWeight:600,wordBreak:"break-word"}}>{v}</div></div>)}
+            </div>
+            <div style={{marginTop:14,padding:12,background:"#F8FAFC",borderRadius:8,border:"1px solid var(--bdr)"}}>
+              <div style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:14,marginBottom:8}}>KYC Verification</div>
+              <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10}}>
+                <div style={{fontSize:13}}>Government ID: {viewUser.kyc_id_uploaded?"🟢 Uploaded":"⚪ Not uploaded"}</div>
+                <div style={{fontSize:13}}>Selfie Check: {viewUser.kyc_selfie_done?"🟢 Completed":"⚪ Not completed"}</div>
+                <div style={{fontSize:13}}>Phone Verify: {viewUser.kyc_phone_verified?"🟢 Verified":"⚪ Not verified"}</div>
+              </div>
+            </div>
+            {viewUser.video_intro_url&&<div style={{marginTop:14}}><a href={viewUser.video_intro_url} target="_blank" rel="noreferrer">🎥 Open Video Introduction</a></div>}
+            {viewUser.skill_showcase_json&&<div style={{marginTop:10,fontSize:12,color:"var(--sub)"}}>✅ Live Skill Showcase saved for this freelancer.</div>}
+            <div style={{display:"flex",gap:10,marginTop:20}}><Btn onClick={()=>setViewUser(null)}>Close</Btn></div>
+          </div>
+        </div>
+      )}
       {/* Edit User Modal */}
       {editUser&&(
         <div className="overlay" onClick={()=>setEditUser(null)}>
@@ -1962,6 +2025,7 @@ function AllUsers({ toast }) {
                 <td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(u.created_at)}</td>
                 <td>
                   <div style={{display:"flex",gap:5,flexWrap:"wrap"}}>
+                    {u.role==="freelancer"&&<Btn variant="outline" size="sm" onClick={()=>setViewUser(u)}>👁 View</Btn>}
                     {u.role==="freelancer"&&<Btn variant="ghost" size="sm" onClick={()=>openEdit(u)}>✏️ Edit</Btn>}
                     {u.role==="freelancer"&&["UNDER_REVIEW","ASSESSMENT_PENDING","ASSESSMENT_SUBMITTED"].includes(u.fs)&&<Btn variant="primary" size="sm" loading={acting===`${u.id}:approve`} onClick={()=>doAction(u.id,"approve")}>✓ Approve</Btn>}
                     {u.role!=="admin"&&u.status!=="suspended"&&u.status!=="banned"&&<Btn variant="ghost" size="sm" loading={acting===`${u.id}:suspend`} onClick={()=>doAction(u.id,"suspend")}>⏸ Suspend</Btn>}
@@ -2007,7 +2071,18 @@ function JobsAdmin({ toast }) {
 function PaymentsAdmin({ toast }) {
   const [escrows,setEscrows]=useState([]);const [txns,setTxns]=useState([]);const [jobs,setJobs]=useState([]);const [showDep,setShowDep]=useState(false);const [dForm,setDForm]=useState({job_id:"",amount:"",method:"mpesa",phone:"254712345678"});const [loading,setLoading]=useState("");
   const load=async()=>{const [e,t,j]=await Promise.all([db.get(K.E),db.get(K.TX),db.get(K.J)]);setEscrows(e||[]);setTxns(t||[]);setJobs(j||[]);};
-  useEffect(()=>{load();},[]);
+  useEffect(()=>{load();const tid=setInterval(load,10000);return ()=>clearInterval(tid);},[]);
+  const flagTxn = async (id) => {
+    await supabase.from("transactions").update({ status:"flagged" }).eq("id", id);
+    toast("Transaction flagged","info");
+    load();
+  };
+  const deleteTxn = async (id) => {
+    if(!window.confirm("Delete this transaction record?")) return;
+    await supabase.from("transactions").delete().eq("id", id);
+    toast("Transaction deleted","success");
+    load();
+  };
   const deposit=async()=>{
     if(!dForm.job_id||!dForm.amount) return toast("Job and amount required","error");
     setLoading("dep");await new Promise(r=>setTimeout(r,1200));
@@ -2029,10 +2104,11 @@ function PaymentsAdmin({ toast }) {
     <div>
       {showDep&&(<div className="overlay" onClick={()=>setShowDep(false)}><div className="modal" style={{maxWidth:460,padding:32}} onClick={e=>e.stopPropagation()}><h3 style={{fontFamily:"var(--fh)",fontSize:20,fontWeight:700,marginBottom:22}}>Deposit to Escrow</h3><div style={{display:"flex",flexDirection:"column",gap:14}}><Sel label="Job" value={dForm.job_id} onChange={v=>setDForm({...dForm,job_id:v})} options={[{value:"",label:"Select a job…"},...jobs.filter(j=>j.status!=="completed").map(j=>({value:String(j.id),label:j.title}))]} required/><Inp label="Amount (KES)" type="number" value={dForm.amount} onChange={v=>setDForm({...dForm,amount:v})} required/><Sel label="Payment Method" value={dForm.method} onChange={v=>setDForm({...dForm,method:v})} options={[{value:"mpesa",label:"M-Pesa STK Push"},{value:"stripe",label:"Stripe"},{value:"bank",label:"Bank Transfer"}]}/>{dForm.method==="mpesa"&&<Inp label="Phone" value={dForm.phone} onChange={v=>setDForm({...dForm,phone:v})}/>}</div><div style={{display:"flex",gap:10,marginTop:22}}><Btn loading={loading==="dep"} onClick={deposit}>Process Deposit</Btn><Btn variant="ghost" onClick={()=>setShowDep(false)}>Cancel</Btn></div></div></div>)}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Payments & Escrow</h1><Btn onClick={()=>setShowDep(true)} icon="💳">Deposit to Escrow</Btn></div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginBottom:24}} className="stagger">
+      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:16,marginBottom:24}} className="stagger">
         <Stat label="Held in Escrow" value={fmtKES(escrows.filter(e=>e.status==="holding").reduce((s,e)=>s+e.amount,0))} icon="🔒" color="var(--warn)"/>
         <Stat label="Released Total" value={fmtKES(txns.filter(t=>t.type==="escrow_release").reduce((s,t)=>s+t.amount,0))} icon="💸" color="var(--g)"/>
         <Stat label="Transactions" value={txns.length} icon="📊" color="var(--info)"/>
+        <Stat label="Assessment Payments" value={txns.filter(t=>t.type==="assessment_fee").length} icon="🧪" color="var(--pur)"/>
       </div>
       <Card style={{padding:0,overflow:"hidden",marginBottom:20}}>
         <div style={{padding:"14px 20px",borderBottom:"1px solid var(--bdr)"}}><h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16}}>Active Escrows</h3></div>
@@ -2041,6 +2117,10 @@ function PaymentsAdmin({ toast }) {
       <Card style={{padding:0,overflow:"hidden"}}>
         <div style={{padding:"14px 20px",borderBottom:"1px solid var(--bdr)"}}><h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16}}>Transaction Ledger</h3></div>
         {txns.length===0?<Empty icon="📒" title="No transactions" sub="Transactions appear here"/>:<table><thead><tr><th>Type</th><th>Amount</th><th>Entry</th><th>Reference</th><th>Date</th></tr></thead><tbody>{[...txns].reverse().map(t=>(<tr key={t.id}><td style={{fontWeight:500}}>{t.type.replace(/_/g," ")}</td><td style={{fontFamily:"var(--fh)",fontWeight:700,color:t.entry_type==="credit"?"var(--gd)":"var(--err)"}}>{t.entry_type==="credit"?"+":"-"}{fmtKES(t.amount)}</td><td><Bdg status={t.entry_type==="credit"?"APPROVED":"REJECTED"} label={t.entry_type}/></td><td style={{fontFamily:"var(--fm)",fontSize:12,color:"var(--sub)"}}>{t.reference}</td><td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(t.created_at)}</td></tr>))}</tbody></table>}
+      </Card>
+      <Card style={{padding:0,overflow:"hidden",marginTop:18}}>
+        <div style={{padding:"14px 20px",borderBottom:"1px solid var(--bdr)"}}><h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16}}>Assessment Payments (Real-time)</h3></div>
+        {txns.filter(t=>t.type==="assessment_fee").length===0?<Empty icon="🧪" title="No assessment payments yet" sub="Freelancer assessment payments appear here"/>:<table><thead><tr><th>Reference</th><th>Amount</th><th>Status</th><th>Date</th><th>Action</th></tr></thead><tbody>{txns.filter(t=>t.type==="assessment_fee").sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).map(t=>(<tr key={t.id}><td style={{fontFamily:"var(--fm)",fontSize:12}}>{t.reference}</td><td style={{fontFamily:"var(--fh)",fontWeight:700}}>{fmtKES(t.amount)}</td><td><Bdg status={t.status==="flagged"?"REJECTED":"APPROVED"} label={t.status||"completed"}/></td><td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(t.created_at)}</td><td><div style={{display:"flex",gap:6}}><Btn size="sm" variant="outline" onClick={()=>flagTxn(t.id)}>🚩 Flag</Btn><Btn size="sm" variant="danger" onClick={()=>deleteTxn(t.id)}>🗑 Delete</Btn></div></td></tr>))}</tbody></table>}
       </Card>
     </div>
   );
@@ -2078,7 +2158,7 @@ function MessagesView({ user, toast }) {
       ? users.filter(u=>["admin","support"].includes(u.role))
       : (() => {
           if(!newMsg.to) return [];
-          const toUser=users.find(u=>u.email===newMsg.to||String(u.id)===newMsg.to);
+          const toUser=users.find(u=>String(u.id)===String(newMsg.to));
           return toUser ? [toUser] : [];
         })();
     if(recipients.length===0) return toast("Recipient not found","error");
@@ -2098,7 +2178,7 @@ function MessagesView({ user, toast }) {
   };
   return (
     <div>
-      {showNew&&(<div className="overlay" onClick={()=>setShowNew(false)}><div className="modal" style={{maxWidth:440,padding:32}} onClick={e=>e.stopPropagation()}><h3 style={{fontFamily:"var(--fh)",fontSize:20,fontWeight:700,marginBottom:20}}>New Message</h3><div style={{display:"flex",flexDirection:"column",gap:14}}>{user.role==="freelancer"?<div style={{padding:"12px 14px",background:"var(--surf)",borderRadius:8,fontSize:13,color:"var(--mu)"}}><strong>Recipients:</strong> admin@afrigig.com and support@afrigig.com (both receive a copy)</div>:<Inp label="To (email or user ID)" value={newMsg.to} onChange={v=>setNewMsg({...newMsg,to:v})} required/>}<Inp label="Message" value={newMsg.body} onChange={v=>setNewMsg({...newMsg,body:v})} rows={4} required/></div><div style={{display:"flex",gap:10,marginTop:20}}><Btn onClick={sendNew}>Send</Btn><Btn variant="ghost" onClick={()=>setShowNew(false)}>Cancel</Btn></div></div></div>)}
+      {showNew&&(<div className="overlay" onClick={()=>setShowNew(false)}><div className="modal" style={{maxWidth:520,padding:32}} onClick={e=>e.stopPropagation()}><h3 style={{fontFamily:"var(--fh)",fontSize:20,fontWeight:700,marginBottom:20}}>New Message</h3><div style={{display:"flex",flexDirection:"column",gap:14}}>{user.role==="freelancer"?<div style={{padding:"12px 14px",background:"var(--surf)",borderRadius:8,fontSize:13,color:"var(--mu)"}}><strong>Recipients:</strong> admin@afrigig.com and support@afrigig.com (both receive a copy)</div>:<Sel label="Recipient (User ID)" value={newMsg.to} onChange={v=>setNewMsg({...newMsg,to:v})} options={[{value:"",label:"Select user..."},...users.filter(u=>u.id!==user.id).map(u=>({value:String(u.id),label:`${u.name} (${u.email}) · ${u.role}`}))]} required/>}<Inp label="Message" value={newMsg.body} onChange={v=>setNewMsg({...newMsg,body:v})} rows={4} required/></div><div style={{display:"flex",gap:10,marginTop:20}}><Btn onClick={sendNew}>Send</Btn><Btn variant="ghost" onClick={()=>setShowNew(false)}>Cancel</Btn></div></div></div>)}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Messages</h1><Btn onClick={()=>setShowNew(true)} icon="✉">New Message</Btn></div>
       <Card style={{padding:0,overflow:"hidden",display:"grid",gridTemplateColumns:"300px 1fr",height:580}}>
         <div style={{borderRight:"1px solid var(--bdr)",overflowY:"auto"}}>
@@ -2284,7 +2364,8 @@ function BadgeDisplay({ badge, size = "md" }) {
 
 // ─── VIDEO INTRO ─────────────────────────────────────────────
 function VideoIntro({ user, toast }) {
-  const [videoUrl, setVideoUrl] = useState(null);
+  const [videoUrl, setVideoUrl] = useState(user.video_intro_url || null);
+  const [videoInput, setVideoInput] = useState(user.video_intro_url || "");
   const [recording, setRecording] = useState(false);
   const [countdown, setCountdown] = useState(30);
   const [stream, setStream] = useState(null);
@@ -2334,7 +2415,15 @@ function VideoIntro({ user, toast }) {
 
   const discard = () => {
     setVideoUrl(null);
+    setVideoInput("");
     if (stream) stream.getTracks().forEach(t => t.stop());
+  };
+  const saveVideoUrl = async () => {
+    if (!videoInput) return toast("Paste a public video URL first","error");
+    await db.patch(K.U, user.id, { video_intro_url: videoInput });
+    try { await ApiUsers.updateProfile({ video_intro_url: videoInput }); } catch (_) {}
+    setVideoUrl(videoInput);
+    toast("Video intro saved","success");
   };
 
   return (
@@ -2374,74 +2463,77 @@ function VideoIntro({ user, toast }) {
           <Btn onClick={startRecording} icon="🎥">Start Recording (30s)</Btn>
         </div>
       )}
+      <div style={{marginTop:12,display:"grid",gridTemplateColumns:"1fr auto",gap:10}}>
+        <input className="inp" value={videoInput} onChange={e=>setVideoInput(e.target.value)} placeholder="Or paste public video URL (YouTube/Loom/Drive)" />
+        <Btn variant="outline" onClick={saveVideoUrl}>Save URL</Btn>
+      </div>
     </Card>
   );
 }
 
 // ─── LIVE SKILL SANDBOX ───────────────────────────────────────
 function LiveSkillSandbox({ user }) {
-  const CODE_TRACKS = new Set(["software", "devops", "data"]);
-  const DESIGN_TRACKS = new Set(["design"]);
-  const isCode = CODE_TRACKS.has(user.track);
-  const isDesign = DESIGN_TRACKS.has(user.track);
-  if (!isCode && !isDesign) return null;
+  const TRACK_MODE = {
+    software: "code",
+    devops: "code",
+    data: "code",
+    uiux: "design",
+    writing: "document",
+    nontech: "document",
+  };
+  const mode = TRACK_MODE[user.track];
+  if (!mode) return null;
 
+  const [lang, setLang] = useState(user.track === "software" ? "javascript" : user.track === "devops" ? "yaml" : user.track === "data" ? "sql" : "markdown");
   const [tab, setTab] = useState("html");
-  const [html, setHtml] = useState(isCode
-    ? `<!-- Live code demo -->\n<div class="demo">\n  <h2>Hello from AfriGig!</h2>\n  <button onclick="greet()">Click me</button>\n  <p id="out"></p>\n</div>`
-    : `<!-- Design showcase -->\n<div class="card">\n  <h2>My UI Component</h2>\n  <p>Showcasing my design style.</p>\n  <button>Primary Button</button>\n</div>`);
-  const [css, setCss] = useState(isCode
-    ? `.demo{font-family:sans-serif;padding:20px;text-align:center}\nbutton{background:#00D4A0;color:#fff;border:none;padding:10px 20px;border-radius:8px;cursor:pointer;font-size:15px}\nbutton:hover{background:#00A880}\n#out{margin-top:12px;color:#374151;font-size:15px}`
-    : `body{font-family:sans-serif;background:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh}\n.card{background:#fff;border-radius:16px;padding:32px;box-shadow:0 4px 16px rgba(0,0,0,.1);text-align:center;max-width:320px}\nh2{color:#0C0F1A;margin-bottom:8px}\np{color:#6B7280;margin-bottom:20px}\nbutton{background:linear-gradient(135deg,#00D4A0,#00A880);color:#fff;border:none;padding:12px 28px;border-radius:10px;cursor:pointer;font-weight:700;font-size:14px}`);
-  const [js, setJs] = useState(isCode
-    ? `function greet() {\n  document.getElementById('out').textContent = '👋 Hi! I build awesome web apps.';\n}`
-    : `// Add interactivity here`);
-
+  const [html, setHtml] = useState(`<!-- Live code demo -->\n<div class="demo"><h2>AfriGig Showcase</h2><p id="out">Edit and run preview.</p></div>`);
+  const [css, setCss] = useState(`body{font-family:Inter,sans-serif;padding:16px}.demo{background:#f8fafc;padding:16px;border-radius:12px}`);
+  const [js, setJs] = useState(`document.getElementById('out').textContent='Updated at '+new Date().toLocaleTimeString();`);
+  const [doc, setDoc] = useState(`## ${TRACKS[user.track]?.label || "Showcase"}\n- Key deliverables\n- Portfolio proof\n- Process and outcomes`);
+  const [saving, setSaving] = useState(false);
   const srcDoc = `<!DOCTYPE html><html><head><style>${css}</style></head><body>${html}<script>${js}<\/script></body></html>`;
-  const tabs = [
-    { key:"html", label:"HTML", lang:"HTML" },
-    { key:"css",  label:"CSS",  lang:"CSS"  },
-    { key:"js",   label:"JS",   lang:"JS"   },
-  ];
-  const vals = { html, css, js };
-  const setters = { html:setHtml, css:setCss, js:setJs };
+
+  const saveShowcase = async () => {
+    setSaving(true);
+    const payload = { mode, lang, html, css, js, doc, updated_at: now() };
+    await db.patch(K.U, user.id, { skill_showcase_json: payload });
+    try { await ApiUsers.updateProfile({ skill_showcase_json: payload }); } catch (_) {}
+    setSaving(false);
+  };
 
   return (
     <Card style={{ padding:0, overflow:"hidden", marginTop:20 }}>
-      <div style={{ padding:"14px 20px", borderBottom:"1px solid var(--bdr)", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+      <div style={{ padding:"14px 20px", borderBottom:"1px solid var(--bdr)", display:"flex", justifyContent:"space-between", alignItems:"center", gap:10 }}>
         <div>
           <h3 style={{ fontFamily:"var(--fh)", fontWeight:700, fontSize:16 }}>Live Skill Showcase</h3>
-          <p style={{ color:"var(--sub)", fontSize:12, marginTop:2 }}>Clients see your code live on your profile. Edit below, preview updates instantly.</p>
+          <p style={{ color:"var(--sub)", fontSize:12, marginTop:2 }}>
+            {mode==="code" ? "Show live code/work samples. Save to publish on your profile for clients." : "Showcase writing/operations process and outputs clients can review."}
+          </p>
         </div>
-        <span style={{ fontSize:12, color:"var(--sub)", background:"var(--surf)", padding:"4px 10px", borderRadius:6, fontFamily:"var(--fm)" }}>Live Preview →</span>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {mode==="code" && <Sel label="" value={lang} onChange={setLang} options={[{value:"javascript",label:"JavaScript"},{value:"typescript",label:"TypeScript"},{value:"python",label:"Python"},{value:"sql",label:"SQL"},{value:"yaml",label:"YAML"},{value:"bash",label:"Bash"}]}/>}
+          <Btn variant="outline" loading={saving} onClick={saveShowcase}>Save Showcase</Btn>
+        </div>
       </div>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", minHeight:380 }}>
-        <div style={{ display:"flex", flexDirection:"column", borderRight:"1px solid var(--bdr)" }}>
-          <div style={{ display:"flex", borderBottom:"1px solid var(--bdr)" }}>
-            {tabs.map(t => (
-              <button key={t.key} onClick={() => setTab(t.key)}
-                style={{ flex:1, padding:"9px 0", border:"none", cursor:"pointer", fontSize:12, fontWeight:700, fontFamily:"var(--fh)",
-                  background: tab===t.key ? "var(--gl)" : "#fff",
-                  color: tab===t.key ? "var(--gd)" : "var(--sub)",
-                  borderBottom: tab===t.key ? "2px solid var(--g)" : "2px solid transparent" }}
-              >{t.label}</button>
-            ))}
+
+      {mode==="code" ? (
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", minHeight:380 }}>
+          <div style={{ display:"flex", flexDirection:"column", borderRight:"1px solid var(--bdr)" }}>
+            <div style={{ display:"flex", borderBottom:"1px solid var(--bdr)" }}>
+              {[{ key:"html", label:"HTML" },{ key:"css", label:"CSS" },{ key:"js", label:"Code" }].map(t => (
+                <button key={t.key} onClick={() => setTab(t.key)} style={{ flex:1, padding:"9px 0", border:"none", cursor:"pointer", fontSize:12, fontWeight:700, fontFamily:"var(--fh)", background: tab===t.key ? "var(--gl)" : "#fff", color: tab===t.key ? "var(--gd)" : "var(--sub)", borderBottom: tab===t.key ? "2px solid var(--g)" : "2px solid transparent" }}>{t.label}</button>
+              ))}
+            </div>
+            <textarea className="code-ed" value={tab==="html"?html:tab==="css"?css:js} onChange={e=>tab==="html"?setHtml(e.target.value):tab==="css"?setCss(e.target.value):setJs(e.target.value)} style={{ flex:1, padding:14, border:"none", borderRadius:0, resize:"none", minHeight:320, outline:"none" }} spellCheck={false}/>
           </div>
-          <textarea
-            className="code-ed"
-            value={vals[tab]}
-            onChange={e => setters[tab](e.target.value)}
-            style={{ flex:1, padding:14, border:"none", borderRadius:0, resize:"none", minHeight:320, outline:"none" }}
-            spellCheck={false}
-          />
+          <iframe title="preview" sandbox="allow-scripts" srcDoc={srcDoc} style={{ border:"none", width:"100%", height:"100%", minHeight:340, background:"#fff" }}/>
         </div>
-        <iframe
-          title="preview"
-          sandbox="allow-scripts"
-          srcDoc={srcDoc}
-          style={{ border:"none", width:"100%", height:"100%", minHeight:340, background:"#fff" }}
-        />
-      </div>
+      ) : (
+        <div style={{padding:18}}>
+          <Inp label="Showcase Document (Markdown/Text)" value={doc} onChange={setDoc} rows={12} />
+          <div style={{marginTop:10,padding:12,border:"1px solid var(--bdr)",borderRadius:8,background:"var(--surf)",whiteSpace:"pre-wrap",fontSize:13.5}}>{doc}</div>
+        </div>
+      )}
     </Card>
   );
 }
@@ -2769,6 +2861,7 @@ function FrDashboard({ user, onNav }) {
   const [jobs, setJobs] = useState([]);
   const [wallet, setWallet] = useState(null);
   const [badge, setBadge] = useState(null);
+  const isApproved = user.fs==="APPROVED" || !!user.approved_at;
   const pendingCount = Object.values(user.assessment_map || {}).filter(v => ["ASSESSMENT_PENDING","UNDER_REVIEW","ASSESSMENT_SUBMITTED"].includes(v?.status)).length;
   useEffect(()=>{
     db.get(K.J).then(j => {
@@ -2791,12 +2884,12 @@ function FrDashboard({ user, onNav }) {
         {badge && <BadgeDisplay badge={badge}/>}
       </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(5,1fr)",gap:16,marginBottom:24}} className="stagger">
-        <Card style={{padding:18,cursor:user.fs==="APPROVED"?"pointer":"not-allowed",opacity:user.fs==="APPROVED"?1:.75}} onClick={user.fs==="APPROVED"?()=>onNav("earnings"):undefined}>
+        <Card style={{padding:18,cursor:isApproved?"pointer":"not-allowed",opacity:isApproved?1:.75}} onClick={isApproved?()=>onNav("earnings"):undefined}>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
             <div>
               <p style={{fontSize:12,color:"var(--sub)",fontWeight:600,marginBottom:8,textTransform:"uppercase",letterSpacing:".05em"}}>Wallet Balance</p>
               <p style={{fontSize:24,fontWeight:800,fontFamily:"var(--fh)",color:"var(--ink)"}}>{fmtKES(wallet?.balance||0)}</p>
-              <p style={{fontSize:12,color:"var(--sub)",marginTop:6}}>{user.fs==="APPROVED"?"Open wallet analytics & withdrawals":"Unlocks after approval"}</p>
+              <p style={{fontSize:12,color:"var(--sub)",marginTop:6}}>{isApproved?"Open wallet analytics & withdrawals":"Unlocks after approval"}</p>
             </div>
             <div style={{width:44,height:44,background:"rgba(0,212,160,.12)",borderRadius:12,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20}}>💰</div>
           </div>
@@ -2964,7 +3057,7 @@ function FrEarnings({ user, toast }) {
 
   useEffect(()=>{ Promise.all([db.get(K.W),db.get(K.TX)]).then(([ws,tx])=>{const w=(ws||[]).find(x=>x.user_id===user.id);setWallet(w);setTxns(w?(tx||[]).filter(t=>t.wallet_id===w.id).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)):[]);}); },[]);
 
-  const approved = user.fs==="APPROVED";
+  const approved = user.fs==="APPROVED" || !!user.approved_at;
   const lastWithdrawal = txns.find(t => t.type==="withdrawal_request");
   const nextWindow = lastWithdrawal ? new Date(new Date(lastWithdrawal.created_at).getTime() + 14*86400000) : null;
   const canWithdraw = approved && (!nextWindow || Date.now() >= nextWindow.getTime());
@@ -3084,13 +3177,21 @@ function FrEarnings({ user, toast }) {
 }
 
 function FrProfile({ user, toast }) {
-  const [form, setForm] = useState({skills:user.skills||"",experience:user.experience||"",country:user.country||"",bio:user.bio||"",portfolio_links:user.portfolio_links||"",availability:user.availability||"Full-time"});
+  const [form, setForm] = useState({skills:user.skills||"",experience:user.experience||"",country:user.country||"",bio:user.bio||"",portfolio_links:user.portfolio_links||"",availability:user.availability||"Full-time",phone_number:user.phone_number||"",video_intro_url:user.video_intro_url||""});
   const [saving, setSaving] = useState(false);
   const [badge, setBadge] = useState(null);
   useEffect(()=>{
     (async()=>{try{const js=await db.get(K.J);const ws=await db.get(K.W);const w=(ws||[]).find(x=>x.user_id===user.id);const comp=(js||[]).filter(j=>j.assigned_to===user.id&&j.status==="completed");setBadge(computeBadge(user,comp.length,w?.balance||0));}catch(_){}})();
   },[]);
-  const save=async()=>{setSaving(true);await db.patch(K.U,user.id,form);try{await ApiUsers.updateProfile(form);}catch{}await auditLog(user.id,"profile.update","Profile updated");toast("Profile updated!","success");setSaving(false);};
+  const save=async()=>{
+    if(!form.phone_number) return toast("Phone number is required for wallet and payouts","error");
+    setSaving(true);
+    await db.patch(K.U,user.id,{...form,kyc_phone_verified:true});
+    try{await ApiUsers.updateProfile({...form,kyc_phone_verified:true});}catch{}
+    await auditLog(user.id,"profile.update","Profile updated");
+    toast("Profile updated!","success");
+    setSaving(false);
+  };
   return (
     <div>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:24}}>
@@ -3104,16 +3205,18 @@ function FrProfile({ user, toast }) {
             <Inp label="Skills (comma-separated)" value={form.skills} onChange={v=>setForm({...form,skills:v})}/>
             <Inp label="Experience Summary" value={form.experience} onChange={v=>setForm({...form,experience:v})} rows={3}/>
             <Inp label="Country" value={form.country} onChange={v=>setForm({...form,country:v})}/>
+            <Inp label="Mobile Number (M-Pesa)" value={form.phone_number} onChange={v=>setForm({...form,phone_number:v})} required hint="Required for withdrawals and payout verification"/>
             <Sel label="Availability" value={form.availability} onChange={v=>setForm({...form,availability:v})} options={["Full-time","Part-time","Weekends only","Project-based"]}/>
             <Inp label="Bio" value={form.bio} onChange={v=>setForm({...form,bio:v})} rows={3}/>
             <Inp label="Portfolio URL" value={form.portfolio_links} onChange={v=>setForm({...form,portfolio_links:v})}/>
+            <Inp label="Public Video Intro URL (optional)" value={form.video_intro_url} onChange={v=>setForm({...form,video_intro_url:v})} placeholder="https://..."/>
             <Btn loading={saving} onClick={save}>Save Changes</Btn>
           </div>
         </Card>
         <Card style={{padding:26}}>
           <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16,marginBottom:18}}>Account Status</h3>
           <div style={{display:"flex",flexDirection:"column",gap:12}}>
-            {[["Status",user.fs,"badge"],["Track",user.track?`${TRACKS[user.track]?.icon} ${TRACKS[user.track]?.label}`:"Not selected","text"],["Assessment Score",user.assessment_pct!==undefined?`${user.assessment_pct}%`:"Not taken","text"],["Member since",fmtDate(user.created_at),"text"]].map(([l,v,type])=>(
+            {[["Status",user.fs,"badge"],["Track",user.track?`${TRACKS[user.track]?.icon} ${TRACKS[user.track]?.label}`:"Not selected","text"],["Assessment Score",deriveAssessmentPct(user)!==null?`${deriveAssessmentPct(user)}%`:"Not taken","text"],["Member since",fmtDate(user.created_at),"text"],["Mobile Number",user.phone_number||"Not set","text"]].map(([l,v,type])=>(
               <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"10px 14px",background:"var(--surf)",borderRadius:8,alignItems:"center"}}>
                 <span style={{fontSize:13,color:"var(--sub)"}}>{l}</span>
                 {type==="badge"?<Bdg status={v}/>:<span style={{fontFamily:"var(--fh)",fontWeight:600,fontSize:14}}>{v}</span>}
@@ -3122,8 +3225,8 @@ function FrProfile({ user, toast }) {
           </div>
           <div style={{marginTop:20}}>
             <div style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:14,marginBottom:14,color:"var(--mu)"}}>KYC Verification</div>
-            {[["Government ID","Not uploaded","⚪"],["Selfie Check","Not completed","⚪"],["Phone Verify","Not verified","⚪"]].map(([l,s,icon])=>(<div key={l} style={{display:"flex",justifyContent:"space-between",padding:"10px 14px",background:"var(--surf)",borderRadius:8,marginBottom:8,alignItems:"center"}}><span style={{fontSize:13}}>{l}</span><span style={{fontSize:12,color:"var(--sub)"}}>{icon} {s}</span></div>))}
-            <div style={{marginTop:14}}><FileUpload label="Upload National ID / Passport" onUpload={()=>toast("KYC document uploaded","success")} accept=".pdf,.jpg,.png" hint="Accepted: PDF, JPG, PNG"/></div>
+            {[["Government ID",user.kyc_id_uploaded?"Uploaded":"Not uploaded",user.kyc_id_uploaded?"🟢":"⚪"],["Selfie Check",user.kyc_selfie_done?"Completed":"Not completed",user.kyc_selfie_done?"🟢":"⚪"],["Phone Verify",user.kyc_phone_verified?"Verified":"Not verified",user.kyc_phone_verified?"🟢":"⚪"]].map(([l,s,icon])=>(<div key={l} style={{display:"flex",justifyContent:"space-between",padding:"10px 14px",background:"var(--surf)",borderRadius:8,marginBottom:8,alignItems:"center"}}><span style={{fontSize:13}}>{l}</span><span style={{fontSize:12,color:"var(--sub)"}}>{icon} {s}</span></div>))}
+            <div style={{marginTop:14}}><FileUpload label="Upload National ID / Passport" onUpload={async()=>{await db.patch(K.U,user.id,{kyc_id_uploaded:true});toast("KYC document uploaded","success");}} accept=".pdf,.jpg,.png" hint="Accepted: PDF, JPG, PNG"/></div>
           </div>
         </Card>
       </div>
@@ -3139,8 +3242,8 @@ function FrProfile({ user, toast }) {
 function SupportApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead }) {
   usePresence(user?.id, `Support: ${view||"dashboard"}`);
   const counts=useDashCounts();
-  const titles={dashboard:"Support Dashboard",tickets:"Tickets",messages:"Messages",users:"Users",reviews:"FR Reviews"};
-  const views={dashboard:<SupportDashboard/>,tickets:<TicketsView user={user} toast={toast}/>,messages:<MessagesView user={user} toast={toast}/>,users:<AllUsers toast={toast}/>,reviews:<FRReviews toast={toast}/>};
+  const titles={dashboard:"Support Dashboard",registrations:"New Registrations",tickets:"Tickets",messages:"Messages",users:"Users",reviews:"FR Reviews",jobs:"Jobs",payments:"Payments",reports:"Analytics"};
+  const views={dashboard:<SupportDashboard/>,registrations:<NewRegistrations/>,tickets:<TicketsView user={user} toast={toast}/>,messages:<MessagesView user={user} toast={toast}/>,users:<AllUsers toast={toast}/>,reviews:<FRReviews toast={toast}/>,jobs:<JobsAdmin toast={toast}/>,payments:<PaymentsAdmin toast={toast}/>,reports:<Reports/>};
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
       <Sidebar role="support" active={view} onNav={onNav} user={user} onLogout={onLogout} unread={unread} counts={counts}/>
@@ -3221,7 +3324,32 @@ export default function AfriGigApp() {
     try {
       const { data: profile } = await supabase.from("profiles").select("*").eq("id", authUser.id).maybeSingle();
       if (profile) {
-        u = { ...u, fs: profile.freelancer_status ?? u.fs, track: profile.track ?? u.track, assessment_pct: profile.assessment_pct ?? u.assessment_pct, assessment_unlocked: profile.assessment_unlocked ?? u.assessment_unlocked, queue_pos: profile.queue_position ?? u.queue_pos, review_deadline: profile.review_deadline ?? u.review_deadline, skills: Array.isArray(profile.skills) ? profile.skills.join(", ") : (profile.skills || u.skills), portfolio_links: Array.isArray(profile.portfolio_links) ? profile.portfolio_links.join(", ") : (profile.portfolio_links || u.portfolio_links), experience: profile.experience ?? u.experience, availability: profile.availability ?? u.availability, bio: profile.bio ?? u.bio, country: profile.country ?? u.country, assessment_map: profile.assessment_map || u.assessment_map || {} };
+        const profPct = profile.assessment_pct ?? (Object.values(profile.assessment_map || {}).map(v => Number(v?.score ?? v?.pct)).filter(n => Number.isFinite(n)).pop() ?? null);
+        u = {
+          ...u,
+          fs:                  profile.freelancer_status ?? u.fs,
+          track:               profile.track ?? u.track,
+          assessment_pct:      profPct ?? u.assessment_pct,
+          assessment_unlocked: profile.assessment_unlocked ?? u.assessment_unlocked,
+          queue_pos:           profile.queue_position ?? u.queue_pos,
+          review_deadline:     profile.review_deadline ?? u.review_deadline,
+          skills:              Array.isArray(profile.skills) ? profile.skills.join(", ") : (profile.skills || u.skills),
+          portfolio_links:     Array.isArray(profile.portfolio_links) ? profile.portfolio_links.join(", ") : (profile.portfolio_links || u.portfolio_links),
+          experience:          profile.experience ?? u.experience,
+          availability:        profile.availability ?? u.availability,
+          bio:                 profile.bio ?? u.bio,
+          country:             profile.country ?? u.country,
+          assessment_map:      profile.assessment_map || u.assessment_map || {},
+          phone_number:        profile.phone_number ?? u.phone_number,
+          kyc_id_uploaded:     profile.kyc_id_uploaded ?? u.kyc_id_uploaded,
+          kyc_selfie_done:     profile.kyc_selfie_done ?? u.kyc_selfie_done,
+          kyc_phone_verified:  profile.kyc_phone_verified ?? u.kyc_phone_verified,
+          approved_at:         profile.approved_at ?? u.approved_at,
+          video_intro_url:     profile.video_intro_url ?? u.video_intro_url,
+          skill_showcase_json: profile.skill_showcase_json ?? u.skill_showcase_json,
+          created_at:          profile.created_at ?? u.created_at,
+          assessment_submitted_at: profile.assessment_submitted_at ?? u.assessment_submitted_at,
+        };
       }
     } catch (_) {}
     return u;
@@ -3268,6 +3396,10 @@ export default function AfriGigApp() {
 
   const handleLogin=useCallback((u,token)=>{
     setUser(u);
+    // If this user has any progress signal, mark them as past onboarding forever
+    if(u.role==="freelancer" && (u.track || u.assessment_pct || u.assessment_unlocked || Object.keys(u.assessment_map||{}).length > 0)) {
+      try { localStorage.setItem(`ag3_past_ob_${u.id}`, "1"); } catch(_) {}
+    }
     if(u.role==="admin") navigate("/admin/dashboard");
     else if(u.role==="support") navigate("/support/dashboard");
     else navigate("/freelancer/dashboard");
@@ -3347,12 +3479,16 @@ export default function AfriGigApp() {
     } else if(assessmentMode==="assessment"){
       content=<AssessmentFlow user={user} onComplete={u=>{setUser(u);setAssessmentMode(null);}} toast={toast} onLogout={handleLogout} onGoHome={()=>{setAssessmentMode(null);setView("dashboard");navigate("/freelancer/dashboard");}}/>;
     } else if(
-      // Only truly brand-new freelancers (no track, no assessment history, early-stage status) see onboarding.
-      // ANY progress signal (track selected, assessment attempted, score recorded, advanced status) → FreelancerApp.
+      // ONLY show onboarding to brand-new users with ZERO progress.
+      // Any of these signals = go straight to dashboard:
+      !["APPROVED","UNDER_REVIEW","ASSESSMENT_PENDING","ASSESSMENT_SUBMITTED"].includes(user.fs) &&
       (!user.fs || user.fs === "REGISTERED" || user.fs === "PROFILE_COMPLETED") &&
       !user.track &&
       !user.assessment_pct &&
-      Object.keys(user.assessment_map || {}).length === 0
+      !user.assessment_unlocked &&
+      Object.keys(user.assessment_map || {}).length === 0 &&
+      // Belt-and-suspenders: if they've ever passed onboarding before, skip it
+      !localStorage.getItem(`ag3_past_ob_${user.id}`)
     ){
       content=<Onboarding user={user} onUpdateUser={u=>{setUser(u);if(u.start_assessment_now===true)setAssessmentMode("assessment");}} onLogout={handleLogout} toast={toast}/>;
     } else {

@@ -51,6 +51,13 @@ function resolveUserId(userId) {
 // ─── Shape: Profile → App User ───────────────────────────────
 function toAppUser(p) {
   if (!p) return null;
+  const derivedPct = (() => {
+    if (p.assessment_pct !== null && p.assessment_pct !== undefined) return p.assessment_pct;
+    const amap = p.assessment_map || {};
+    const vals = Object.values(amap).map(v => Number(v?.score ?? v?.pct)).filter(n => Number.isFinite(n));
+    if (vals.length === 0) return null;
+    return Math.max(...vals);
+  })();
   return {
     id: p.id,
     name: p.name || "User",
@@ -65,18 +72,26 @@ function toAppUser(p) {
     bio: p.bio || "",
     portfolio_links: Array.isArray(p.portfolio_links) ? p.portfolio_links.join(", ") : (p.portfolio_links || ""),
     country: p.country || "",
-    assessment_pct: p.assessment_pct ?? null,
+    assessment_pct: derivedPct,
     assessment_unlocked: p.assessment_unlocked ?? false,
     queue_pos: p.queue_position ?? null,
     review_deadline: p.review_deadline ?? null,
     assessment_map: p.assessment_map || {},
     is_online: p.is_online ?? false,
-    rejection_reason: p.rejection_reason || null,
-    approved_at: p.approved_at || null,
-    assessment_submitted_at: p.assessment_submitted_at || null,
-    created_at: p.created_at || null,
-    updated_at: p.updated_at || null,
-  };
+  rejection_reason: p.rejection_reason || null,
+  approved_at: p.approved_at || null,
+  assessment_submitted_at: p.assessment_submitted_at || null,
+  created_at: p.created_at || null,
+  updated_at: p.updated_at || null,
+  phone_number: p.phone_number || null,
+  kyc_id_uploaded: p.kyc_id_uploaded ?? false,
+  kyc_selfie_done: p.kyc_selfie_done ?? false,
+  kyc_phone_verified: p.kyc_phone_verified ?? false,
+  video_intro_url: p.video_intro_url || null,
+  skill_showcase_json: p.skill_showcase_json || null,
+  last_seen: p.last_seen || null,
+  current_activity: p.current_activity || null,
+};
 }
 
 // ─── Shape: App User → Profile update ─────────────────────────
@@ -103,6 +118,12 @@ function toProfileUpdate(u) {
   if (u.review_deadline !== undefined) out.review_deadline = u.review_deadline;
   if (u.assessment_map !== undefined) out.assessment_map = u.assessment_map;
   if (u.approved_at !== undefined) out.approved_at = u.approved_at;
+  if (u.phone_number !== undefined) out.phone_number = u.phone_number;
+  if (u.kyc_id_uploaded !== undefined) out.kyc_id_uploaded = u.kyc_id_uploaded;
+  if (u.kyc_selfie_done !== undefined) out.kyc_selfie_done = u.kyc_selfie_done;
+  if (u.kyc_phone_verified !== undefined) out.kyc_phone_verified = u.kyc_phone_verified;
+  if (u.video_intro_url !== undefined) out.video_intro_url = u.video_intro_url;
+  if (u.skill_showcase_json !== undefined) out.skill_showcase_json = u.skill_showcase_json;
   out.updated_at = new Date().toISOString();
   return out;
 }
@@ -385,14 +406,20 @@ export const db = {
         return { ...item, id: data.id };
       }
       if (k === K.T) {
-        const { data, error } = await supabase.from("tickets").insert({
-          user_id: item.user_id,
-          subject: item.subject,
-          message: item.message,
-          status: item.status || "open",
-          priority: item.priority || "medium",
-          category: item.category || "general",
-        }).select("id").single();
+        const row = {
+          user_id:      item.user_id,
+          subject:      item.subject,
+          message:      item.message,
+          status:       item.status || "open",
+          priority:     item.priority || "medium",
+          category:     item.category || "general",
+          sla_deadline: item.sla_deadline || null,
+        };
+        // assigned_to must be a valid UUID referencing auth.users
+        if (item.assigned_to && isUuid(String(item.assigned_to))) {
+          row.assigned_to = item.assigned_to;
+        }
+        const { data, error } = await supabase.from("tickets").insert(row).select("id").single();
         if (error) throw error;
         return { ...item, id: data.id, replies: [], created_at: new Date().toISOString() };
       }
