@@ -2,5 +2,15 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "framework": null,
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+  "functions": {
+    "api/mpesa.js":  { "maxDuration": 30 },
+    "api/email.js":  { "maxDuration": 15 },
+    "api/b2c.js":    { "maxDuration": 30 }
+  },
+  "rewrites": [
+    { "source": "/api/mpesa",  "destination": "/api/mpesa" },
+    { "source": "/api/email",  "destination": "/api/email" },
+    { "source": "/api/b2c",    "destination": "/api/b2c" },
+    { "source": "/(.*)",       "destination": "/index.html" }
+  ]
 }

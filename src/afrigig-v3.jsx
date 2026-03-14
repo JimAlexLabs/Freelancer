@@ -3,6 +3,17 @@ import { Auth as ApiAuth, Users as ApiUsers } from "./api.js";
 import { supabase } from "./supabaseClient.js";
 import { db, K, getAdminId, getAdminProfile, updatePresence } from "./supabaseData.js";
 import Mpesa from "./mpesa.js";
+import { useLegal, LegalModals, TosCheckbox, NonRefundableNotice, LegalFooter } from "./legal.jsx";
+import { uploadFile } from "./storage.js";
+import {
+  WithdrawalModal, MilestonesView, ReviewModal, FreelancerReviews,
+  KYCFlow, KYCReviewQueue, PublicProfile,
+  SubscriptionPlans, CounterOfferModal,
+  useDarkMode, DarkModeToggle,
+  ReferralPanel, ExportReports, RevenueDashboard,
+  AnnouncementBanner, AnnouncementsAdmin, PromoCodesAdmin,
+  EarningsChart, SLAMonitor, TemplateReplies, SEOMeta,
+} from "./features.jsx";
 
 /* AfriGig Platform v3.0 */
 
@@ -250,17 +261,32 @@ async function createNotif(userId, type, title, message) {
   await db.push(K.N, { id:uid(), user_id:userId, type, title, message, is_read:false, created_at:now() });
 }
 
-async function sendEmail(userId, subject, body) {
+async function sendEmail(userId, subject, body, templateId, templateData) {
   let toAddr = userId;
   if (userId === 1 || userId === "1") {
     const admin = await getAdminProfile();
     toAddr = admin?.email || "admin@afrigig.com";
+  } else if (typeof userId === "string" && userId.includes("@")) {
+    toAddr = userId; // already an email address
   } else {
     const users = (await db.get(K.U)) || [];
     const u = users.find(x => x.id === userId);
     toAddr = u?.email || userId;
   }
+  // Log to DB (always)
   await db.push(K.EM, { id:uid(), to:toAddr, subject, body, sent_at:now(), status:"sent" });
+  // Fire real email via Resend API (non-blocking)
+  try {
+    fetch("/api/email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to: toAddr,
+        subject,
+        ...(templateId ? { templateId, templateData } : { html: `<p>${body}</p>`, text: body }),
+      }),
+    }).catch(() => {}); // silent fail — email log is the source of truth
+  } catch (_) {}
 }
 
 async function auditLog(userId, type, desc) {
@@ -512,16 +538,44 @@ function Tabs({ tabs, active, onChange }) {
   );
 }
 
-function FileUpload({ label, onUpload, accept="*", hint }) {
+function FileUpload({ label, onUpload, accept="*", hint, uploadType, userId, uploadMeta={} }) {
   const [dragging, setDragging] = useState(false);
   const [file, setFile] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadErr, setUploadErr] = useState(null);
   const ref = useRef();
-  const handle = f => { if (!f) return; setFile(f); const r=new FileReader(); r.onload=()=>onUpload?.({name:f.name,size:f.size,type:f.type,uploaded_at:now()}); r.readAsDataURL(f); };
+  const handle = async f => {
+    if (!f) return;
+    setFile(f);
+    setUploadErr(null);
+    // If uploadType + userId provided, upload to Supabase Storage
+    if (uploadType && userId) {
+      setUploading(true);
+      const result = await uploadFile(f, uploadType, userId, uploadMeta);
+      setUploading(false);
+      if (result.error) {
+        setUploadErr(result.error);
+        onUpload?.({ name:f.name, size:f.size, type:f.type, error:result.error, uploaded_at:now() });
+      } else {
+        onUpload?.({ name:f.name, size:f.size, type:f.type, url:result.url, path:result.path, bucket:result.bucket, uploaded_at:now() });
+      }
+    } else {
+      // Fallback: read as DataURL (no real upload)
+      const r = new FileReader();
+      r.onload = () => onUpload?.({ name:f.name, size:f.size, type:f.type, uploaded_at:now() });
+      r.readAsDataURL(f);
+    }
+  };
   return (
     <div>
       {label&&<label className="lbl" style={{marginBottom:8}}>{label}</label>}
-      <div className={`fdr ${dragging?"dov":""}`} onClick={()=>ref.current.click()} onDrop={e=>{e.preventDefault();setDragging(false);handle(e.dataTransfer.files[0]);}} onDragOver={e=>{e.preventDefault();setDragging(true);}} onDragLeave={()=>setDragging(false)}>
-        {file?<div style={{color:"var(--gd)",fontWeight:600,fontSize:14}}>✓ {file.name} ({(file.size/1024).toFixed(1)} KB)</div>:<><div style={{fontSize:30,marginBottom:8}}>📁</div><div style={{fontSize:14,color:"var(--sub)"}}>Drop file here or <span style={{color:"var(--g)",fontWeight:600}}>browse</span></div>{hint&&<div style={{fontSize:12,color:"var(--sub)",marginTop:4}}>{hint}</div>}</>}
+      <div className={`fdr ${dragging?"dov":""}`} onClick={()=>!uploading&&ref.current.click()} onDrop={e=>{e.preventDefault();setDragging(false);handle(e.dataTransfer.files[0]);}} onDragOver={e=>{e.preventDefault();setDragging(true);}} onDragLeave={()=>setDragging(false)}>
+        {uploading
+          ? <div style={{color:"var(--g)",fontWeight:600,fontSize:14}}>⏳ Uploading {file?.name}…</div>
+          : file
+            ? <div style={{color:uploadErr?"var(--err)":"var(--gd)",fontWeight:600,fontSize:14}}>{uploadErr?`✗ ${uploadErr}`:`✓ ${file.name} (${(file.size/1024).toFixed(1)} KB)`}</div>
+            : <><div style={{fontSize:30,marginBottom:8}}>📁</div><div style={{fontSize:14,color:"var(--sub)"}}>Drop file here or <span style={{color:"var(--g)",fontWeight:600}}>browse</span></div>{hint&&<div style={{fontSize:12,color:"var(--sub)",marginTop:4}}>{hint}</div>}</>
+        }
         <input ref={ref} type="file" accept={accept} style={{display:"none"}} onChange={e=>handle(e.target.files[0])}/>
       </div>
     </div>
@@ -632,10 +686,12 @@ function Sidebar({ role, active, onNav, user, onLogout, unread, counts, mobileOp
 
 function Topbar({ user, unread, notifs, onMarkRead, onMarkAll, title }) {
   const [open, setOpen] = useState(false);
+  const { isDark, toggle: toggleDark } = useDarkMode();
   return (
-    <div style={{height:58,background:"#fff",borderBottom:"1px solid var(--bdr)",display:"flex",alignItems:"center",padding:"0 24px",gap:16,position:"sticky",top:0,zIndex:50}}>
+    <div style={{height:58,background:"var(--wh)",borderBottom:"1px solid var(--bdr)",display:"flex",alignItems:"center",padding:"0 24px",gap:16,position:"sticky",top:0,zIndex:50}}>
       <div style={{flex:1}}><span style={{fontFamily:"var(--fh)",fontWeight:600,fontSize:15,color:"var(--navy)",textTransform:"capitalize"}}>{title||"Dashboard"}</span></div>
       <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <DarkModeToggle isDark={isDark} onToggle={toggleDark}/>
         <div style={{position:"relative"}}>
           <button className="btn bg2 bsm" onClick={()=>setOpen(o=>!o)} style={{fontSize:18,padding:"6px 10px",position:"relative"}}>
             🔔{unread>0&&<span style={{position:"absolute",top:4,right:4,width:8,height:8,background:"var(--err)",borderRadius:"50%",border:"2px solid #fff"}}/>}
@@ -753,6 +809,8 @@ function AuthPage({ mode, navigate, onLogin, toast }) {
   const [form, setForm] = useState({ name:"", email:"", password:"", confirm:"" });
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState({});
+  const [agreedToTos, setAgreedToTos] = useState(false);
+  const legal = useLegal();
   const isLogin = mode === "login";
 
   const validate = () => {
@@ -761,6 +819,7 @@ function AuthPage({ mode, navigate, onLogin, toast }) {
     if (!form.email.includes("@")) e.email = "Valid email required";
     if (form.password.length < 6) e.password = "At least 6 characters";
     if (!isLogin && form.password !== form.confirm) e.confirm = "Passwords don't match";
+    if (!isLogin && !agreedToTos) e.tos = "You must accept the Terms of Service to register";
     setErrors(e);
     return !Object.keys(e).length;
   };
@@ -781,6 +840,10 @@ function AuthPage({ mode, navigate, onLogin, toast }) {
       onLogin(res.user, res.token);
       toast(`Welcome back, ${res.user.name.split(" ")[0]}!`);
     } else {
+      // Store ToS agreement
+      if (res.user?.id) {
+        db.patch(K.U, res.user.id, { tos_agreed_at: now(), tos_version: "1.0" }).catch(()=>{});
+      }
       toast("Account created! Please check your email to verify, then sign in.");
       navigate("/login");
     }
@@ -788,6 +851,7 @@ function AuthPage({ mode, navigate, onLogin, toast }) {
 
   return (
     <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#0C0F1A 0%,#162032 100%)",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+      <LegalModals {...legal}/>
       <div style={{width:"100%",maxWidth:420}} className="au">
         <div style={{textAlign:"center",marginBottom:28}}>
           <div style={{width:52,height:52,background:"linear-gradient(135deg,var(--g),var(--gd))",borderRadius:15,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 16px"}}>
@@ -840,6 +904,15 @@ function AuthPage({ mode, navigate, onLogin, toast }) {
                 placeholder="••••••••"
                 required
                 error={errors.confirm}
+              />
+            )}
+            {!isLogin && (
+              <TosCheckbox
+                agreed={agreedToTos}
+                onToggle={() => setAgreedToTos(v => !v)}
+                openTos={legal.openTos}
+                openPrivacy={legal.openPrivacy}
+                error={errors.tos}
               />
             )}
             <Btn
@@ -1126,11 +1199,40 @@ function TrackStep({ user, onSave, toast }) {
 
 function PaymentStep({ user, onUnlock, toast }) {
   const fee = user.track ? (ASSESSMENT_FEE_BY_TRACK[user.track] ?? DEFAULT_ASSESSMENT_FEE) : DEFAULT_ASSESSMENT_FEE;
-  const [phone, setPhone] = useState("254712345678");
+  const [phone, setPhone] = useState(user.phone_number || "254712345678");
   const [method, setMethod] = useState("mpesa");
   const [phase, setPhase] = useState("idle");
+  const [agreedNonRefund, setAgreedNonRefund] = useState(false);
+  const [promoCode, setPromoCode] = useState("");
+  const [promoApplied, setPromoApplied] = useState(null);
+  const [checkingPromo, setCheckingPromo] = useState(false);
+  const legal = useLegal();
+
+  const applyPromo = async () => {
+    if (!promoCode.trim()) return;
+    setCheckingPromo(true);
+    try {
+      const { data } = await supabase.from("promo_codes")
+        .select("*").eq("code", promoCode.toUpperCase()).eq("is_active", true).maybeSingle();
+      if (!data) { toast("Invalid or expired promo code","error"); }
+      else if (data.max_uses && data.uses_count >= data.max_uses) { toast("Promo code has reached its usage limit","error"); }
+      else {
+        setPromoApplied(data);
+        toast(`Promo applied! ${data.discount_type==="percent" ? `${data.discount_value}% off` : `KES ${data.discount_value} off`}`,"success");
+      }
+    } catch(_) { toast("Could not verify promo code","error"); }
+    setCheckingPromo(false);
+  };
+
+  const effectiveFee = promoApplied
+    ? Math.max(1, promoApplied.discount_type === "percent"
+        ? Math.round(fee * (1 - promoApplied.discount_value / 100))
+        : fee - promoApplied.discount_value)
+    : fee;
+
   const pay = async () => {
-    const amt = fee;
+    const amt = effectiveFee;
+    if (!agreedNonRefund) return toast("Please acknowledge the non-refundable notice before proceeding","error");
     if (method==="mpesa"&&!phone.trim()) return toast("Phone number required","error");
     setPhase("stk");
 
@@ -1202,22 +1304,46 @@ function PaymentStep({ user, onUnlock, toast }) {
     }, method==="mpesa" ? 3000 : 1500);
   };
   if (phase==="done") return (<div style={{textAlign:"center",maxWidth:400}}><div style={{fontSize:64,marginBottom:16}} className="bi">✅</div><h3 style={{fontFamily:"var(--fh)",fontSize:22}}>Payment Confirmed!</h3><p style={{color:"var(--sub)",marginTop:8}}>Launching assessment…</p></div>);
-  // Enhanced success UI with professional messaging is handled in the done state above.
   return (
-    <div style={{width:"100%",maxWidth:460}} className="au">
+    <div style={{width:"100%",maxWidth:480}} className="au">
+      <LegalModals {...legal}/>
       <h2 style={{fontFamily:"var(--fh)",fontSize:30,fontWeight:800,marginBottom:8}}>Unlock Assessment</h2>
       <p style={{color:"var(--sub)",marginBottom:28}}>One-time payment to access your track-based skills assessment.</p>
       <Card style={{padding:28}}>
         {phase==="idle"?(
           <div style={{display:"flex",flexDirection:"column",gap:14}}>
             <div style={{background:"var(--gl)",border:"1px solid rgba(0,212,160,.2)",borderRadius:10,padding:"14px 18px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <div><div style={{fontSize:13,fontWeight:600,color:"var(--gd)"}}>Assessment Fee</div><div style={{fontSize:12,color:"var(--gd)",opacity:.7}}>{user.track && TRACKS[user.track] ? `${TRACKS[user.track].label} · ` : ""}One-time · Includes expert review</div></div>
-              <div style={{fontFamily:"var(--fh)",fontWeight:800,fontSize:22,color:"var(--gd)"}}>KES {fee.toLocaleString()}</div>
+              <div>
+                <div style={{fontSize:13,fontWeight:600,color:"var(--gd)"}}>Assessment Fee</div>
+                <div style={{fontSize:12,color:"var(--gd)",opacity:.7}}>{user.track && TRACKS[user.track] ? `${TRACKS[user.track].label} · ` : ""}One-time · Includes expert review</div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                {promoApplied && <div style={{fontSize:12,color:"var(--sub)",textDecoration:"line-through"}}>KES {fee.toLocaleString()}</div>}
+                <div style={{fontFamily:"var(--fh)",fontWeight:800,fontSize:22,color:"var(--gd)"}}>KES {effectiveFee.toLocaleString()}</div>
+                {promoApplied && <div style={{fontSize:11,color:"var(--g)",fontWeight:700}}>Promo applied ✓</div>}
+              </div>
+            </div>
+            {/* Promo code */}
+            <div style={{display:"flex",gap:8}}>
+              <input className="inp" value={promoCode} onChange={e=>setPromoCode(e.target.value.toUpperCase())} placeholder="Promo code (optional)" style={{flex:1,fontSize:13}}/>
+              <Btn variant="outline" size="sm" loading={checkingPromo} onClick={applyPromo}>Apply</Btn>
             </div>
             <Sel label="Payment Method" value={method} onChange={setMethod} options={[{value:"mpesa",label:"M-Pesa (STK Push)"},{value:"stripe",label:"Stripe (Card)"}]}/>
             {method==="mpesa"&&<Inp label="M-Pesa Phone" value={phone} onChange={setPhone} placeholder="254712345678"/>}
             <div style={{background:"#FFFBEB",borderRadius:8,padding:"10px 14px",fontSize:13,color:"#92400E"}}>📱 {method==="mpesa"?"You'll receive a push notification on your phone.":"Your card will be charged securely."}</div>
-            <Btn onClick={pay} style={{width:"100%",justifyContent:"center"}}>Pay KES {fee.toLocaleString()} & Unlock Assessment →</Btn>
+            <NonRefundableNotice
+              agreed={agreedNonRefund}
+              onToggle={()=>setAgreedNonRefund(v=>!v)}
+              fee={effectiveFee}
+              track={user.track && TRACKS[user.track]?.label}
+            />
+            <Btn onClick={pay} disabled={!agreedNonRefund} style={{width:"100%",justifyContent:"center"}}>
+              Pay KES {effectiveFee.toLocaleString()} & Unlock Assessment →
+            </Btn>
+            <p style={{fontSize:11,color:"var(--sub)",textAlign:"center"}}>
+              By paying you agree to our{" "}
+              <button type="button" onClick={legal.openTos} style={{background:"none",border:"none",color:"var(--g)",cursor:"pointer",fontSize:11,padding:0}}>Terms of Service</button>
+            </p>
           </div>
         ):(
           <div style={{textAlign:"center",padding:"24px 0"}}>
@@ -1567,7 +1693,7 @@ function useDashCounts() {
 function AdminApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead }) {
   usePresence(user?.id, `Admin: ${view||"dashboard"}`);
   const counts=useDashCounts();
-  const titles={dashboard:"Dashboard",registrations:"New Registrations",reviews:"FR Reviews",users:"All Users",jobs:"Job Management",payments:"Payments & Escrow",messages:"Messages",tickets:"Support Tickets",emails:"Email Log",reports:"Analytics",audit:"Audit Log",settings:"Platform Settings"};
+  const titles={dashboard:"Dashboard",registrations:"New Registrations",reviews:"FR Reviews",users:"All Users",jobs:"Job Management",payments:"Payments & Escrow",messages:"Messages",tickets:"Support Tickets",emails:"Email Log",reports:"Analytics",revenue:"Revenue Dashboard",kyc_queue:"KYC Review Queue",announcements:"Announcements",promo_codes:"Promo Codes",exports:"Export Reports",audit:"Audit Log",settings:"Platform Settings"};
   const views={
     dashboard:<AdminOverview onNav={onNav}/>,
     registrations:<NewRegistrations/>,
@@ -1579,6 +1705,11 @@ function AdminApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead
     tickets:<TicketsView user={user} toast={toast}/>,
     emails:<EmailLog/>,
     reports:<Reports/>,
+    revenue:<RevenueDashboard/>,
+    kyc_queue:<KYCReviewQueue toast={toast}/>,
+    announcements:<AnnouncementsAdmin toast={toast}/>,
+    promo_codes:<PromoCodesAdmin toast={toast}/>,
+    exports:<ExportReports/>,
     audit:<AuditLog/>,
     settings:<PlatformSettings toast={toast}/>,
   };
@@ -1587,6 +1718,7 @@ function AdminApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead
       <Sidebar role="admin" active={view} onNav={onNav} user={user} onLogout={onLogout} unread={unread} counts={counts}/>
       <div style={{marginLeft:244,flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
         <Topbar user={user} unread={unread} notifs={notifs} onMarkRead={markRead} onMarkAll={markAllRead} title={titles[view]||"Dashboard"}/>
+        <AnnouncementBanner role="admin"/>
         <div key={view} style={{flex:1,padding:"26px 28px",overflowY:"auto"}} className="au">{views[view]||views.dashboard}</div>
       </div>
     </div>
@@ -2732,6 +2864,12 @@ function FrGrowth({ user, onNav }) {
           </tbody>
         </table>
       </Card>
+
+      {/* Referral & Subscriptions */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:20, marginTop:20 }}>
+        <ReferralPanel user={user} toast={toast}/>
+        <SubscriptionPlans user={user} toast={toast}/>
+      </div>
     </div>
   );
 }
@@ -2756,9 +2894,11 @@ function FreelancerApp({ user, view, onNav, onLogout, toast, notifs, unread, mar
   };
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
+      <SEOMeta title={`${titles[view]||"Dashboard"} — AfriGig`} description="Africa's most rigorous verified freelancing platform"/>
       <Sidebar role="freelancer" active={view} onNav={onNav} user={user} onLogout={onLogout} unread={unread}/>
       <div style={{marginLeft:244,flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
         <Topbar user={user} unread={unread} notifs={notifs} onMarkRead={markRead} onMarkAll={markAllRead} title={titles[view]||"Dashboard"}/>
+        <AnnouncementBanner role="freelancer"/>
         <div key={view} style={{flex:1,padding:"26px 28px",overflowY:"auto"}} className="au">{views[view]||views.dashboard}</div>
       </div>
     </div>
@@ -3048,6 +3188,7 @@ function FrEarnings({ user, toast }) {
   const [txns, setTxns] = useState([]);
   const [amount, setAmount] = useState("");
   const [processing, setProcessing] = useState(false);
+  const [showWithdrawModal, setShowWithdrawModal] = useState(false);
   // 2FA OTP state
   const [otpModal, setOtpModal] = useState(false);
   const [otp, setOtp] = useState("");
@@ -3147,27 +3288,17 @@ function FrEarnings({ user, toast }) {
           </div>
         </div>
       )}
-      <div style={{marginBottom:24}}><h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Earnings & Wallet</h1></div>
+      {showWithdrawModal && <WithdrawalModal user={user} wallet={wallet} onClose={()=>setShowWithdrawModal(false)} toast={toast} onSuccess={async()=>{const ws=await db.get(K.W);const w=(ws||[]).find(x=>x.user_id===user.id);setWallet(w);const tx=await db.get(K.TX);setTxns(w?(tx||[]).filter(t=>t.wallet_id===w.id).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)):txns);}}/>}
+      <div style={{marginBottom:24,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+        <h1 style={{fontFamily:"var(--fh)",fontSize:28,fontWeight:800}}>Earnings & Wallet</h1>
+        <Btn onClick={()=>setShowWithdrawModal(true)} disabled={!canWithdraw}>Withdraw Funds</Btn>
+      </div>
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:16,marginBottom:24}} className="stagger">
         <Stat label="Wallet Balance" value={fmtKES(wallet?.balance||0)} icon="💰" color="var(--g)"/>
         <Stat label="Total Earned" value={fmtKES(txns.filter(t=>t.entry_type==="credit").reduce((s,t)=>s+t.amount,0))} icon="📈" color="var(--info)"/>
         <Stat label="Transactions" value={txns.length} icon="📊" color="var(--pur)"/>
       </div>
-      <Card style={{padding:22,marginBottom:18}}>
-        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
-          <h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16}}>Withdraw Funds</h3>
-          <span style={{fontSize:12,color:"var(--sub)",background:"var(--surf)",padding:"3px 10px",borderRadius:6}}>🔐 KES 5,000+ requires OTP</span>
-        </div>
-        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,alignItems:"end"}}>
-          <Inp label="Amount (KES)" type="number" value={amount} onChange={setAmount} placeholder="e.g. 10000"/>
-          <div>
-            <Btn onClick={requestWithdraw} loading={processing} disabled={!canWithdraw || !amount}>Request Withdrawal</Btn>
-            <div style={{fontSize:12,color:"var(--sub)",marginTop:8}}>
-              {!canWithdraw && nextWindow ? `Next withdrawal window: ${nextWindow.toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"})}` : "Withdrawals are processed every 2 weeks."}
-            </div>
-          </div>
-        </div>
-      </Card>
+      <EarningsChart userId={user.id}/>
       <Card style={{padding:0,overflow:"hidden"}}>
         <div style={{padding:"14px 20px",borderBottom:"1px solid var(--bdr)"}}><h3 style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:16}}>Transaction History</h3></div>
         {txns.length===0?<Empty icon="💸" title="No transactions yet" sub="Your earnings will appear here"/>:(<table><thead><tr><th>Type</th><th>Amount</th><th>Reference</th><th>Date</th></tr></thead><tbody>{txns.map(t=>(<tr key={t.id}><td style={{fontWeight:500,textTransform:"capitalize"}}>{t.type.replace(/_/g," ")}</td><td style={{fontFamily:"var(--fh)",fontWeight:700,color:t.entry_type==="credit"?"var(--gd)":"var(--err)"}}>{t.entry_type==="credit"?"+":"-"}{fmtKES(t.amount)}</td><td style={{fontFamily:"var(--fm)",fontSize:12,color:"var(--sub)"}}>{t.reference}</td><td style={{color:"var(--sub)",fontSize:13}}>{fmtDate(t.created_at)}</td></tr>))}</tbody></table>)}
@@ -3224,9 +3355,7 @@ function FrProfile({ user, toast }) {
             ))}
           </div>
           <div style={{marginTop:20}}>
-            <div style={{fontFamily:"var(--fh)",fontWeight:700,fontSize:14,marginBottom:14,color:"var(--mu)"}}>KYC Verification</div>
-            {[["Government ID",user.kyc_id_uploaded?"Uploaded":"Not uploaded",user.kyc_id_uploaded?"🟢":"⚪"],["Selfie Check",user.kyc_selfie_done?"Completed":"Not completed",user.kyc_selfie_done?"🟢":"⚪"],["Phone Verify",user.kyc_phone_verified?"Verified":"Not verified",user.kyc_phone_verified?"🟢":"⚪"]].map(([l,s,icon])=>(<div key={l} style={{display:"flex",justifyContent:"space-between",padding:"10px 14px",background:"var(--surf)",borderRadius:8,marginBottom:8,alignItems:"center"}}><span style={{fontSize:13}}>{l}</span><span style={{fontSize:12,color:"var(--sub)"}}>{icon} {s}</span></div>))}
-            <div style={{marginTop:14}}><FileUpload label="Upload National ID / Passport" onUpload={async()=>{await db.patch(K.U,user.id,{kyc_id_uploaded:true});toast("KYC document uploaded","success");}} accept=".pdf,.jpg,.png" hint="Accepted: PDF, JPG, PNG"/></div>
+            <KYCFlow user={user} toast={toast}/>
           </div>
         </Card>
       </div>
@@ -3242,15 +3371,26 @@ function FrProfile({ user, toast }) {
 function SupportApp({ user, view, onNav, onLogout, toast, notifs, unread, markRead, markAllRead }) {
   usePresence(user?.id, `Support: ${view||"dashboard"}`);
   const counts=useDashCounts();
-  const titles={dashboard:"Support Dashboard",registrations:"New Registrations",tickets:"Tickets",messages:"Messages",users:"Users",reviews:"FR Reviews",jobs:"Jobs",payments:"Payments",reports:"Analytics"};
-  const views={dashboard:<SupportDashboard/>,registrations:<NewRegistrations/>,tickets:<TicketsView user={user} toast={toast}/>,messages:<MessagesView user={user} toast={toast}/>,users:<AllUsers toast={toast}/>,reviews:<FRReviews toast={toast}/>,jobs:<JobsAdmin toast={toast}/>,payments:<PaymentsAdmin toast={toast}/>,reports:<Reports/>};
+  const titles={dashboard:"Support Dashboard",registrations:"New Registrations",tickets:"Tickets",messages:"Messages",users:"Users",reviews:"FR Reviews",jobs:"Jobs",payments:"Payments",reports:"Analytics",kyc_queue:"KYC Review Queue"};
+  const views={dashboard:<SupportDashboard/>,registrations:<NewRegistrations/>,tickets:<SupportTicketsView user={user} toast={toast}/>,messages:<MessagesView user={user} toast={toast}/>,users:<AllUsers toast={toast}/>,reviews:<FRReviews toast={toast}/>,jobs:<JobsAdmin toast={toast}/>,payments:<PaymentsAdmin toast={toast}/>,reports:<Reports/>,kyc_queue:<KYCReviewQueue toast={toast}/>};
   return (
     <div style={{display:"flex",minHeight:"100vh"}}>
       <Sidebar role="support" active={view} onNav={onNav} user={user} onLogout={onLogout} unread={unread} counts={counts}/>
       <div style={{marginLeft:244,flex:1,display:"flex",flexDirection:"column",minWidth:0}}>
         <Topbar user={user} unread={unread} notifs={notifs} onMarkRead={markRead} onMarkAll={markAllRead} title={titles[view]||"Dashboard"}/>
+        <AnnouncementBanner role="support"/>
         <div key={view} style={{flex:1,padding:"26px 28px",overflowY:"auto"}} className="au">{views[view]||views.dashboard}</div>
       </div>
+    </div>
+  );
+}
+
+// Tickets view enhanced with SLA monitor + template replies for support team
+function SupportTicketsView({ user, toast }) {
+  return (
+    <div>
+      <SLAMonitor/>
+      <TicketsView user={user} toast={toast}/>
     </div>
   );
 }
